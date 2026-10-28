@@ -1,0 +1,29 @@
+# ── Dependencies ───────────────────────────────────────────────
+node_modules/
+
+# ── Build outputs ──────────────────────────────────────────────
+dist/
+build/
+*.tsbuildinfo
+
+# ── Environment & secrets ──────────────────────────────────────
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# ── IDE & OS ───────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ── Logs ───────────────────────────────────────────────────────
+*.log
+npm-debug.log*
+
+# ── Coverage & test artifacts ──────────────────────────────────
+coverage/
+.vitest/

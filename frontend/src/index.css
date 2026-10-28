@@ -1,0 +1,110 @@
+@import "tailwindcss";
+
+/* ── MilestoneShield AI Editorial Fintech Design System ─────────── */
+
+@theme {
+  /* Warm Canvas & Surface */
+  --color-canvas: #FAF8F5;
+  --color-canvas-subtle: #F4F1EA;
+  --color-surface: #FFFFFF;
+  --color-surface-hover: #F8F6F1;
+  --color-surface-selected: #F2ECE0;
+
+  /* Borders */
+  --color-border-subtle: #EFEBE3;
+  --color-border-default: #E4DED4;
+  --color-border-strong: #CDC5B7;
+
+  /* Editorial Inks */
+  --color-ink-900: #1B211D;
+  --color-ink-800: #2C3530;
+  --color-ink-700: #424D46;
+  --color-ink-600: #5C6861;
+  --color-ink-500: #78857E;
+  --color-ink-400: #9AA69F;
+  --color-ink-300: #C2CBC6;
+
+  /* Deep Forest Green (Sidebar & Primary Brand) */
+  --color-forest-950: #0C1A14;
+  --color-forest-900: #12241C;
+  --color-forest-850: #172D23;
+  --color-forest-800: #1D372B;
+  --color-forest-700: #244637;
+  --color-forest-600: #2E5846;
+  --color-forest-500: #3E735D;
+  --color-forest-100: #EAF2EE;
+  --color-forest-50: #F4F8F6;
+
+  /* Restrained Accents */
+  --color-ochre-700: #8A4F12;
+  --color-ochre-600: #B16618;
+  --color-ochre-500: #CD7B22;
+  --color-ochre-100: #FDF3E5;
+  --color-ochre-50: #FEF9F2;
+
+  --color-slate-700: #2E4553;
+  --color-slate-600: #3C5A6C;
+  --color-slate-100: #ECF2F6;
+
+  --color-crimson-700: #9B2C2C;
+  --color-crimson-600: #C53030;
+  --color-crimson-100: #FDE8E8;
+
+  /* Typography Stacks */
+  --font-serif: "Newsreader", "Playfair Display", Georgia, Cambria, "Times New Roman", Times, serif;
+  --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+}
+
+/* ── Base Styles ─────────────────────────────────────────────────── */
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background-color: var(--color-canvas);
+  color: var(--color-ink-900);
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background-color: var(--color-canvas);
+  color: var(--color-ink-900);
+}
+
+/* ── Editorial Typography Utility Classes ────────────────────────── */
+
+.font-editorial {
+  font-family: var(--font-serif);
+  font-feature-settings: "kern" 1, "liga" 1;
+}
+
+/* ── AG Grid Editorial Warm Theme Overrides ──────────────────────── */
+
+.ag-theme-custom {
+  --ag-background-color: #FFFFFF;
+  --ag-header-background-color: #F7F4ED;
+  --ag-odd-row-background-color: #FFFFFF;
+  --ag-row-hover-color: #F8F5EE;
+  --ag-foreground-color: #1B211D;
+  --ag-secondary-foreground-color: #5C6861;
+  --ag-border-color: #E4DED4;
+  --ag-header-foreground-color: #424D46;
+  --ag-font-family: var(--font-sans);
+  --ag-font-size: 13px;
+  --ag-row-border-color: #EFEBE3;
+  --ag-header-column-separator-color: #E4DED4;
+  --ag-selected-row-background-color: #F2ECE0;
+}
+
+.ag-theme-custom .ag-header-cell-label {
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  font-size: 11px;
+}
