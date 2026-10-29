@@ -129,10 +129,20 @@ This document describes the planned API surface for MilestoneShield AI. Only end
 |--------|-------|
 | **Method** | `POST` |
 | **Path** | `/api/milestones/:id/paypal/order` |
-| **Status** | 🔮 Planned |
-| **Auth** | Required |
+| **Status** | ✅ Implemented (Milestone 2A) |
+| **Auth** | Prototype / Demo Mode |
 
-**Description:** Creates a PayPal order for the milestone amount. The order is created in `AUTHORIZE` intent — funds are held but not captured until the milestone is approved.
+**Description:** Creates a PayPal Orders v2 order with `intent: 'AUTHORIZE'` for a known milestone. The payment amount and currency are strictly derived from trusted server-side milestone data; client-supplied amounts are rejected.
+
+**Request Body (Optional)**
+
+```json
+{
+  "returnUrl": "http://localhost:5173/overview?paypal_return=true&milestoneId=ms-003",
+  "cancelUrl": "http://localhost:5173/overview?paypal_cancel=true&milestoneId=ms-003",
+  "idempotencyKey": "string (optional, supported via PayPal-Request-Id)"
+}
+```
 
 **Response `201 Created`**
 
@@ -143,8 +153,10 @@ This document describes the planned API surface for MilestoneShield AI. Only end
     "orderId": "PAYPAL-ORDER-ID",
     "status": "CREATED",
     "approveUrl": "https://www.sandbox.paypal.com/checkoutnow?token=...",
-    "amount": 3000,
-    "currency": "USD"
+    "milestoneId": "ms-003",
+    "amount": 2500,
+    "currency": "USD",
+    "paymentRecordId": "pay-sbx-001"
   }
 }
 ```
@@ -157,10 +169,10 @@ This document describes the planned API surface for MilestoneShield AI. Only end
 |--------|-------|
 | **Method** | `POST` |
 | **Path** | `/api/payments/paypal/orders/:id/authorize` |
-| **Status** | 🔮 Planned |
-| **Auth** | Required |
+| **Status** | ✅ Implemented (Milestone 2A) |
+| **Auth** | Prototype / Demo Mode |
 
-**Description:** Authorizes a previously approved PayPal order. Funds are held but not captured. Capture happens only after milestone approval through the policy engine.
+**Description:** Authorizes a previously approved PayPal order via PayPal Orders v2 (`/v2/checkout/orders/{id}/authorize`). Funds are held on the buyer's payment instrument in Sandbox, not captured.
 
 **Response `200 OK`**
 
@@ -171,20 +183,140 @@ This document describes the planned API surface for MilestoneShield AI. Only end
     "orderId": "PAYPAL-ORDER-ID",
     "authorizationId": "AUTH-ID",
     "status": "AUTHORIZED",
-    "amount": 3000
+    "amount": {
+      "currency_code": "USD",
+      "value": "2500.00"
+    }
   }
 }
 ```
 
-**Security Notes:**
-- The AI never independently captures, refunds, or voids a payment.
-- Capture requires explicit approval through the backend policy engine.
-- All payment state transitions are recorded in an audit trail.
-- Ambiguous cases are escalated for human review.
+---
+
+### 6. Capture Authorized Payment
+
+| Detail | Value |
+|--------|-------|
+| **Method** | `POST` |
+| **Path** | `/api/payments/paypal/authorizations/:id/capture` |
+| **Status** | ✅ Implemented (Milestone 2A) |
+| **Auth** | Prototype / Demo Mode |
+
+**Description:** Explicit human operator action to capture an authorized payment via PayPal Payments v2 (`/v2/payments/authorizations/{id}/capture`). Requires explicit confirmation (`confirmed: true`); AI agents are forbidden from executing captures. Validates that current payment state is `AUTHORIZED`. Duplicate captures are prevented with `409 Conflict`.
+
+**Request Body**
+
+```json
+{
+  "confirmed": true,
+  "operatorNote": "string (optional, e.g. Client verified acceptance criteria)",
+  "idempotencyKey": "string (optional)"
+}
+```
+
+**Response `200 OK`**
+
+```json
+{
+  "status": "success",
+  "data": {
+    "authorizationId": "AUTH-ID",
+    "captureId": "CAPTURE-ID",
+    "status": "CAPTURED",
+    "amount": {
+      "currency_code": "USD",
+      "value": "2500.00"
+    }
+  }
+}
+```
 
 ---
 
-### 6. Submit Deliverable
+### 7. Void Authorized Payment
+
+| Detail | Value |
+|--------|-------|
+| **Method** | `POST` |
+| **Path** | `/api/payments/paypal/authorizations/:id/void` |
+| **Status** | ✅ Implemented (Milestone 2A) |
+| **Auth** | Prototype / Demo Mode |
+
+**Description:** Voids an uncaptured authorization via PayPal Payments v2 (`/v2/payments/authorizations/{id}/void`), releasing the temporary authorization hold on the client's payment instrument. Cannot void an already captured payment.
+
+**Request Body (Optional)**
+
+```json
+{
+  "reason": "string (optional)",
+  "idempotencyKey": "string (optional)"
+}
+```
+
+**Response `200 OK`**
+
+```json
+{
+  "status": "success",
+  "data": {
+    "authorizationId": "AUTH-ID",
+    "status": "VOIDED",
+    "message": "Authorization successfully voided in PayPal Sandbox."
+  }
+}
+```
+
+---
+
+### 8. Read PayPal Sandbox Payments & Status
+
+| Detail | Value |
+|--------|-------|
+| **Method** | `GET` |
+| **Paths** | `/api/payments/paypal`<br>`/api/payments/paypal/milestone/:milestoneId`<br>`/api/payments/paypal/orders/:id`<br>`/api/payments/paypal/authorizations/:id` |
+| **Status** | ✅ Implemented (Milestone 2A) |
+| **Auth** | Prototype / Demo Mode |
+
+**Description:** Reads tracked Sandbox payments and audit events from the temporary in-memory store.
+
+**Response `200 OK` (Collection)**
+
+```json
+{
+  "status": "success",
+  "data": {
+    "payments": [
+      {
+        "id": "pay-sbx-001",
+        "milestoneId": "ms-003",
+        "milestoneTitle": "PayPal Sandbox Payment Gateway Integration",
+        "projectId": "proj-001",
+        "projectName": "E-Commerce Platform Redesign & Implementation",
+        "amount": 2500,
+        "currency": "USD",
+        "status": "AUTHORIZED",
+        "paypalOrderId": "PAYPAL-ORDER-ID",
+        "paypalAuthorizationId": "AUTH-ID",
+        "createdAt": "2026-10-28T10:00:00.000Z",
+        "updatedAt": "2026-10-28T10:05:00.000Z",
+        "auditTrail": [ ... ]
+      }
+    ],
+    "summary": {
+      "totalTracked": 1,
+      "authorizedCount": 1,
+      "capturedCount": 0,
+      "voidedCount": 0,
+      "createdCount": 0
+    },
+    "notice": "Tracked Sandbox transactions (in-memory test store). Not an escrow service."
+  }
+}
+```
+
+---
+
+### 9. Submit Deliverable
 
 | Detail | Value |
 |--------|-------|
@@ -219,7 +351,7 @@ This document describes the planned API surface for MilestoneShield AI. Only end
 
 ---
 
-### 7. Process Submission (AI Verification)
+### 10. Process Submission (AI Verification)
 
 | Detail | Value |
 |--------|-------|
@@ -257,7 +389,7 @@ This document describes the planned API surface for MilestoneShield AI. Only end
 
 ---
 
-### 8. Review Submission (Human Decision)
+### 11. Review Submission (Human Decision)
 
 | Detail | Value |
 |--------|-------|
@@ -329,3 +461,35 @@ All errors follow a consistent shape:
 4. **Idempotency.** Payment operations use idempotency keys to prevent duplicate processing.
 5. **Escalation.** Ambiguous AI verification results are flagged for human review.
 6. **Credential isolation.** PayPal secrets, API keys, and database credentials are never exposed to the frontend.
+
+---
+
+## Webhook Architecture & Signature Verification
+
+### PayPal Webhooks (`POST /api/webhooks/paypal`) — ✅ Implemented
+
+| Detail | Value |
+|--------|-------|
+| **Method** | `POST` |
+| **Path** | `/api/webhooks/paypal` |
+| **Status** | ✅ Implemented |
+| **Auth** | PayPal Cryptographic Signature Verification (`PAYPAL-AUTH-ALGO`, `PAYPAL-CERT-URL`, `PAYPAL-TRANSMISSION-ID`, `PAYPAL-TRANSMISSION-SIG`, `PAYPAL-TRANSMISSION-TIME`) |
+| **Rate Limit** | 120 req/min per IP |
+
+**Description:** Receives and reconciles asynchronous PayPal Sandbox lifecycle notifications. The endpoint calls PayPal's `POST /v1/notifications/verify-webhook-signature` endpoint to cryptographically validate that the notification genuinely originated from PayPal.
+
+**Security Controls:**
+1. **SSRF Protection:** Validates that `PAYPAL-CERT-URL` uses HTTPS and targets `*.paypal.com`.
+2. **Cryptographic Verification:** Validates transmission signature against PayPal's verification service using `PAYPAL_WEBHOOK_ID`.
+3. **Idempotency & Deduplication:** Tracks `event.id` in `webhook_events` (and in-memory dedup store) to prevent duplicate processing or replay attacks.
+4. **State Machine Hierarchy:** Forward-only state progression. Stale or out-of-order events cannot downgrade settled (`CAPTURED` or `VOIDED`) payments.
+5. **Redacted Logging:** No secrets, bearer tokens, or sensitive payload details are logged.
+
+**Supported Event Reconciliations:**
+- `CHECKOUT.ORDER.APPROVED` -> Records `BUYER_APPROVED` in payment audit trail.
+- `PAYMENT.AUTHORIZATION.CREATED` -> Transitions payment from `ORDER_CREATED` to `AUTHORIZED`.
+- `PAYMENT.CAPTURE.COMPLETED` -> Transitions payment from `AUTHORIZED` to `CAPTURED`, sets `paypalCaptureId`, and marks milestone `paid`.
+- `PAYMENT.AUTHORIZATION.VOIDED` -> Transitions payment from `AUTHORIZED` to `VOIDED`.
+- `PAYMENT.CAPTURE.DENIED` / `PAYMENT.CAPTURE.DECLINED` -> Transitions payment to `FAILED`.
+- `CUSTOMER.DISPUTE.CREATED` / `CUSTOMER.DISPUTE.RESOLVED` -> Records immutable audit event; does not downgrade captured state.
+- Unsupported events -> Acknowledged with HTTP `200` (`status: "ignored"`) to prevent indefinite webhook retries.

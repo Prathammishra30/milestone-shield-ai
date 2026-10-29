@@ -9,7 +9,9 @@ import {
   Shield,
   X,
   UserCheck,
+  LogOut,
 } from 'lucide-react';
+import { useAuth } from '../context/AuthContext';
 
 interface SidebarProps {
   mobileOpen?: boolean;
@@ -26,6 +28,7 @@ const navItems = [
 ];
 
 export default function Sidebar({ mobileOpen = false, onCloseMobile }: SidebarProps) {
+  const { user, profile, signOut } = useAuth();
   return (
     <>
       {/* Mobile backdrop */}
@@ -108,17 +111,32 @@ export default function Sidebar({ mobileOpen = false, onCloseMobile }: SidebarPr
           </ul>
         </nav>
 
-        {/* Counterparty persona card */}
+        {/* Authenticated User persona card */}
         <div className="border-t border-[#1C3529] p-3.5">
           <div className="rounded-md border border-[#234434] bg-[#162D22] p-2.5">
-            <div className="flex items-center gap-2">
-              <div className="flex h-7 w-7 items-center justify-center rounded-full bg-[#203F30] text-[#88C4A7]">
-                <UserCheck className="h-3.5 w-3.5" />
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2 min-w-0">
+                <div className="flex h-7 w-7 items-center justify-center rounded-full bg-[#203F30] text-[#88C4A7] shrink-0">
+                  <UserCheck className="h-3.5 w-3.5" />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-xs font-semibold text-[#FAF8F5]">
+                    {profile?.fullName || (user?.email ? user.email.split('@')[0] : 'Alex Vance')}
+                  </p>
+                  <p className="text-[10px] text-[#7C978B] capitalize">
+                    {profile?.role || 'Client'} · Sandbox
+                  </p>
+                </div>
               </div>
-              <div className="min-w-0 flex-1">
-                <p className="truncate text-xs font-semibold text-[#FAF8F5]">Acme Retail Corp</p>
-                <p className="text-[10px] text-[#7C978B]">Client Authority · Sandbox</p>
-              </div>
+
+              <button
+                onClick={() => signOut()}
+                title="Sign Out"
+                className="p-1 rounded text-[#7C978B] hover:text-[#DC2626] hover:bg-[#1C3529] transition-colors"
+                aria-label="Sign out"
+              >
+                <LogOut className="w-3.5 h-3.5" />
+              </button>
             </div>
           </div>
 
