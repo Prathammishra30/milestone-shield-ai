@@ -1,0 +1,50 @@
+name: Security & Secret Scan
+
+on:
+  push:
+    branches: [main, feat/*]
+  pull_request:
+    branches: [main]
+
+jobs:
+  secret-scan:
+    name: Automated Secret & Vulnerability Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run Gitleaks Secret Detection
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+          cache-dependency-path: |
+            backend/package-lock.json
+            frontend/package-lock.json
+
+      - name: Install Dependencies
+        run: |
+          npm install --prefix backend
+          npm install --prefix frontend
+
+      - name: Backend Security Audit
+        run: npm audit --prefix backend --audit-level=high
+
+      - name: Frontend Security Audit
+        run: npm audit --prefix frontend --audit-level=high
+
+      - name: TypeScript Static Security Checks
+        run: |
+          npm run typecheck:backend
+          npm run typecheck:frontend
+
+      - name: Run Security & Authorization Test Suite
+        run: npm test

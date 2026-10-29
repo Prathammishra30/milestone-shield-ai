@@ -26,7 +26,7 @@ export function errorHandler(
     res.status(400).json({
       status: 'error',
       message: 'Validation failed',
-      errors: err.errors.map((e) => ({
+      errors: err.issues.map((e) => ({
         path: e.path.join('.'),
         message: e.message,
       })),
