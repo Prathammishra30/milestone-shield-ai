@@ -13,6 +13,9 @@ import { mapDbSubmissionToApp } from './submissions';
 import { mapDbPaymentToApp } from './payments';
 import { env, envSchema } from '../config/env';
 
+/** Deterministic synthetic fixture generator with 0 entropy to prevent secret scanner false positives */
+const fixture = (char: string, length: number): string => char.repeat(length);
+
 describe('Database Access Layer & RLS Client Architecture Suite', () => {
   beforeEach(() => {
     resetServiceSupabaseClientForTests();
@@ -31,7 +34,7 @@ describe('Database Access Layer & RLS Client Architecture Suite', () => {
       const originalKey = env.SUPABASE_ANON_KEY;
 
       (env as Record<string, unknown>).SUPABASE_URL = 'https://valid-project.supabase.co';
-      (env as Record<string, unknown>).SUPABASE_ANON_KEY = 'valid-anon-key-1234567890';
+      (env as Record<string, unknown>).SUPABASE_ANON_KEY = fixture('a', 32);
 
       const userClient = getUserSupabaseClient('test-token:usr-001:client:test@example.com');
       expect(userClient).toBeDefined();
@@ -160,13 +163,13 @@ describe('Database Access Layer & RLS Client Architecture Suite', () => {
       const prodEnv = {
         NODE_ENV: 'production',
         CORS_ORIGIN: 'https://app.milestoneshield.ai',
-        PAYPAL_CLIENT_ID: 'test-client-id-abc',
-        PAYPAL_CLIENT_SECRET: 'test-client-secret-xyz-123456',
+        PAYPAL_CLIENT_ID: fixture('c', 24),
+        PAYPAL_CLIENT_SECRET: fixture('s', 32),
         PAYPAL_BASE_URL: 'https://api-m.sandbox.paypal.com',
         // SUPABASE_URL omitted
-        SUPABASE_ANON_KEY: 'test-anon-key-12345678901234567890',
-        SUPABASE_SERVICE_ROLE_KEY: 'test-service-role-key-1234567890',
-        SUPABASE_JWT_SECRET: 'test-jwt-secret-at-least-32-chars-long',
+        SUPABASE_ANON_KEY: fixture('k', 40),
+        SUPABASE_SERVICE_ROLE_KEY: fixture('r', 40),
+        SUPABASE_JWT_SECRET: fixture('j', 40),
       };
 
       const result = envSchema.safeParse(prodEnv);
@@ -181,13 +184,13 @@ describe('Database Access Layer & RLS Client Architecture Suite', () => {
       const prodEnv = {
         NODE_ENV: 'production',
         CORS_ORIGIN: 'https://app.milestoneshield.ai',
-        PAYPAL_CLIENT_ID: 'test-client-id-abc',
-        PAYPAL_CLIENT_SECRET: 'test-client-secret-xyz-123456',
+        PAYPAL_CLIENT_ID: fixture('c', 24),
+        PAYPAL_CLIENT_SECRET: fixture('s', 32),
         PAYPAL_BASE_URL: 'https://api-m.sandbox.paypal.com',
         SUPABASE_URL: 'https://your-project.supabase.co',
-        SUPABASE_ANON_KEY: 'test-anon-key-12345678901234567890',
-        SUPABASE_SERVICE_ROLE_KEY: 'test-service-role-key-1234567890',
-        SUPABASE_JWT_SECRET: 'test-jwt-secret-at-least-32-chars-long',
+        SUPABASE_ANON_KEY: fixture('k', 40),
+        SUPABASE_SERVICE_ROLE_KEY: fixture('r', 40),
+        SUPABASE_JWT_SECRET: fixture('j', 40),
       };
 
       const result = envSchema.safeParse(prodEnv);
@@ -201,13 +204,13 @@ describe('Database Access Layer & RLS Client Architecture Suite', () => {
       const prodEnv = {
         NODE_ENV: 'production',
         CORS_ORIGIN: 'https://app.milestoneshield.ai',
-        PAYPAL_CLIENT_ID: 'test-client-id-abc',
-        PAYPAL_CLIENT_SECRET: 'test-client-secret-xyz-123456',
+        PAYPAL_CLIENT_ID: fixture('c', 24),
+        PAYPAL_CLIENT_SECRET: fixture('s', 32),
         PAYPAL_BASE_URL: 'https://api-m.sandbox.paypal.com',
         SUPABASE_URL: 'https://valid-project.supabase.co',
-        SUPABASE_ANON_KEY: 'test-anon-key-12345678901234567890',
-        SUPABASE_SERVICE_ROLE_KEY: 'test-service-role-key-1234567890',
-        SUPABASE_JWT_SECRET: 'test-jwt-secret-at-least-32-chars-long',
+        SUPABASE_ANON_KEY: fixture('k', 40),
+        SUPABASE_SERVICE_ROLE_KEY: fixture('r', 40),
+        SUPABASE_JWT_SECRET: fixture('j', 40),
         ALLOW_IN_MEMORY_STORES: 'true',
       };
 
