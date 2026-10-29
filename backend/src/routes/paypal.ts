@@ -51,7 +51,7 @@ const createOrderBodySchema = z
 
 const captureBodySchema = z.object({
   confirmed: z.boolean({
-    required_error: 'Explicit release confirmation boolean is required to capture an authorized payment.',
+    error: 'Explicit release confirmation boolean is required to capture an authorized payment.',
   }),
   operatorNote: z.string().max(500).optional(),
   idempotencyKey: z.string().optional(),

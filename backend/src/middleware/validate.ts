@@ -27,7 +27,7 @@ export function validateQuery(schema: ZodSchema) {
       next(result.error);
       return;
     }
-    req.query = result.data;
+    req.query = result.data as unknown as Request['query'];
     next();
   };
 }
