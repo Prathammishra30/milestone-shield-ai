@@ -104,4 +104,32 @@ export interface PaymentRecord {
   timestamp: string;
   note: string;
   referenceId?: string;
+  isSandboxLive?: boolean;
+  paypalAuthorizationId?: string;
+  paypalCaptureId?: string;
+}
+
+export interface SandboxTrackedPayment {
+  id: string;
+  milestoneId: string;
+  milestoneTitle: string;
+  projectId: string;
+  projectName: string;
+  amount: number;
+  currency: string;
+  status: 'ORDER_CREATED' | 'AUTHORIZED' | 'CAPTURED' | 'VOIDED' | 'FAILED';
+  paypalOrderId: string;
+  paypalAuthorizationId?: string;
+  paypalCaptureId?: string;
+  approveUrl?: string;
+  createdAt: string;
+  updatedAt: string;
+  auditTrail: Array<{
+    id: string;
+    timestamp: string;
+    action: string;
+    actor: string;
+    details: Record<string, unknown>;
+    note?: string;
+  }>;
 }

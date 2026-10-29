@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect, useCallback } from 'react';
 import {
   FileText,
   MessageSquare,
@@ -15,21 +15,44 @@ import {
 } from 'lucide-react';
 import StatusBadge, { milestoneVariant } from '../components/StatusBadge';
 import ReviewActionModal, { type ModalType } from '../components/ReviewActionModal';
+import PayPalSandboxActionPanel from '../components/PayPalSandboxActionPanel';
+import { useAuth } from '../context/AuthContext';
 import {
   sampleProjects,
   sampleMilestones as initialMilestones,
   samplePayments,
   getContractSummary,
 } from '../data/sampleData';
-import type { Milestone, MilestoneStatus } from '../types';
+import type { Milestone, MilestoneStatus, SandboxTrackedPayment } from '../types';
 
 export default function OverviewPage() {
+  const { sessionToken } = useAuth();
   const [project] = useState(sampleProjects[0]);
   const [milestones, setMilestones] = useState<Milestone[]>(initialMilestones);
   const [selectedId, setSelectedId] = useState<string>('ms-002');
   const [activeFilter, setActiveFilter] = useState<'all' | 'submitted' | 'in_progress' | 'paid'>('all');
   const [modalType, setModalType] = useState<ModalType | null>(null);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const [livePayments, setLivePayments] = useState<SandboxTrackedPayment[]>([]);
+
+  // Fetch live Sandbox payments from backend
+  const fetchLivePayments = useCallback(async () => {
+    try {
+      const res = await fetch('/api/payments/paypal', {
+        headers: sessionToken ? { Authorization: `Bearer ${sessionToken}` } : undefined,
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setLivePayments(data.data?.payments || []);
+      }
+    } catch (err) {
+      console.warn('Could not load live sandbox payments:', err);
+    }
+  }, [sessionToken]);
+
+  useEffect(() => {
+    fetchLivePayments();
+  }, [fetchLivePayments]);
 
   // Filtered milestones
   const filteredMilestones = useMemo(() => {
@@ -541,6 +564,12 @@ export default function OverviewPage() {
               </div>
             )}
 
+            {/* Live PayPal Sandbox Lifecycle Action Panel */}
+            <PayPalSandboxActionPanel
+              milestone={selectedMilestone}
+              onPaymentChange={fetchLivePayments}
+            />
+
             {/* Review Decision States & Action Controls */}
             <div className="rounded-lg border border-border-default bg-canvas-subtle p-4 space-y-3">
               <div className="flex items-center justify-between">
@@ -624,11 +653,11 @@ export default function OverviewPage() {
               Contract Allocation & Sample Transaction Ledger
             </h3>
             <p className="text-xs text-ink-500">
-              Demonstration record of simulated payment state transitions (separate from allocation totals above)
+              Live PayPal Sandbox responses combined with baseline sample transaction records
             </p>
           </div>
           <span className="text-xs font-medium text-ink-500">
-            {samplePayments.filter((p) => p.projectName === project.name).length} sample record(s)
+            {livePayments.length} live Sandbox + {samplePayments.filter((p) => p.projectName === project.name).length} sample record(s)
           </span>
         </div>
 
@@ -636,20 +665,54 @@ export default function OverviewPage() {
           <table className="w-full text-left text-xs text-ink-700">
             <thead>
               <tr className="border-b border-border-default text-ink-500 uppercase tracking-wider text-[10px]">
-                <th className="py-2.5 font-semibold">Sample Ref</th>
+                <th className="py-2.5 font-semibold">Reference</th>
                 <th className="py-2.5 font-semibold">Milestone</th>
-                <th className="py-2.5 font-semibold">Settlement Status (Sample)</th>
+                <th className="py-2.5 font-semibold">Settlement Status</th>
                 <th className="py-2.5 font-semibold">Amount</th>
-                <th className="py-2.5 font-semibold">Sample PayPal Order ID</th>
+                <th className="py-2.5 font-semibold">PayPal Order ID</th>
                 <th className="py-2.5 font-semibold">Recorded Date</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-border-subtle">
+              {/* Live Sandbox Payments */}
+              {livePayments.map((lp) => (
+                <tr key={lp.id} className="bg-[#EBF3FC]/40 hover:bg-[#EBF3FC]/70 transition-colors">
+                  <td className="py-3 font-mono font-medium text-ink-900">
+                    <div className="flex items-center gap-1.5">
+                      <span>{lp.id}</span>
+                      <span className="rounded bg-[#EBF3FC] px-1.5 py-0.5 text-[9px] font-bold text-[#1E4E8C] border border-[#BFDBFE]">
+                        SANDBOX LIVE
+                      </span>
+                    </div>
+                  </td>
+                  <td className="py-3 font-medium text-ink-900">{lp.milestoneTitle}</td>
+                  <td className="py-3">
+                    {lp.status === 'CAPTURED' && <StatusBadge label="Captured in PayPal Sandbox" variant="forest" />}
+                    {lp.status === 'AUTHORIZED' && <StatusBadge label="PayPal authorized — not captured" variant="ochre" />}
+                    {lp.status === 'VOIDED' && <StatusBadge label="Voided in Sandbox" variant="crimson" />}
+                    {lp.status === 'ORDER_CREATED' && <StatusBadge label="Order Created (Awaiting Approval)" variant="ochre" />}
+                  </td>
+                  <td className="py-3 font-editorial font-bold text-ink-900">
+                    ${lp.amount.toLocaleString()} {lp.currency}
+                  </td>
+                  <td className="py-3 font-mono text-[11px] text-ink-600 select-all">{lp.paypalOrderId}</td>
+                  <td className="py-3 text-ink-500">{new Date(lp.updatedAt || lp.createdAt).toLocaleDateString()}</td>
+                </tr>
+              ))}
+
+              {/* Sample Demonstration Records */}
               {samplePayments
                 .filter((p) => p.projectName === project.name)
                 .map((tx) => (
                   <tr key={tx.id} className="hover:bg-canvas-subtle/50">
-                    <td className="py-3 font-mono font-medium text-ink-900">{tx.referenceId}</td>
+                    <td className="py-3 font-mono font-medium text-ink-900">
+                      <div className="flex items-center gap-1.5">
+                        <span>{tx.referenceId}</span>
+                        <span className="rounded bg-canvas-subtle px-1.5 py-0.5 text-[9px] font-medium text-ink-500 border border-border-subtle">
+                          SAMPLE
+                        </span>
+                      </div>
+                    </td>
                     <td className="py-3 font-medium text-ink-900">{tx.milestoneTitle}</td>
                     <td className="py-3">
                       <StatusBadge label="Captured in demo data" variant="forest" />
