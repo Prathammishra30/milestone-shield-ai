@@ -249,7 +249,7 @@ export async function dbRecordPaymentTransition(
   input: {
     paymentId: string;
     newStatus: SandboxPaymentStatus;
-    actorId: string;
+    actorId: string | null;
     actorRole: string;
     action: string;
     payload?: Record<string, unknown>;

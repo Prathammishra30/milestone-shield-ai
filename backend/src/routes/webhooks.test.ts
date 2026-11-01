@@ -2,6 +2,11 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import request from 'supertest';
 import { createApp } from '../app';
 import {
+  isSupabaseConfigured,
+  getServiceSupabaseClient,
+  dbRecordPaymentTransition,
+} from '../db';
+import {
   resetPaymentStore,
   createPaymentRecord,
   getPaymentById,
@@ -15,6 +20,23 @@ import { env } from '../config/env';
 
 /** Deterministic synthetic fixture generator with 0 entropy to prevent secret scanner false positives */
 const fixture = (char: string, length: number): string => char.repeat(length);
+
+// ── Mock Supabase db module so the F-6 test can exercise the DB path ──
+const mockIsSupabaseConfigured = vi.hoisted(() => vi.fn(() => false));
+const mockGetServiceSupabaseClient = vi.hoisted(() => vi.fn(() => null));
+const mockDbRecordPaymentTransition = vi.hoisted(() =>
+  vi.fn().mockResolvedValue(undefined)
+);
+
+vi.mock('../db', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../db')>();
+  return {
+    ...actual,
+    isSupabaseConfigured: mockIsSupabaseConfigured,
+    getServiceSupabaseClient: mockGetServiceSupabaseClient,
+    dbRecordPaymentTransition: mockDbRecordPaymentTransition,
+  };
+});
 
 describe('PayPal Webhook Signature Verification & Lifecycle Reconciliation (Milestone 2A)', () => {
   const app = createApp();
@@ -397,6 +419,63 @@ describe('PayPal Webhook Signature Verification & Lifecycle Reconciliation (Mile
       expect(res.status).toBe(200);
       const updated = getPaymentById(payment.id);
       expect(updated?.status).toBe('FAILED');
+    });
+  });
+
+  // ── F-6: Webhook audit actor uses NULL/system actor ─────────────────
+
+  describe('F-6: Webhook audit actor uses NULL/system actor', () => {
+    beforeEach(() => {
+      mockIsSupabaseConfigured.mockReturnValue(true);
+      mockGetServiceSupabaseClient.mockReturnValue({});
+      mockDbRecordPaymentTransition.mockClear();
+    });
+
+    afterEach(() => {
+      mockIsSupabaseConfigured.mockReturnValue(false);
+      mockGetServiceSupabaseClient.mockReturnValue(null);
+      mockDbRecordPaymentTransition.mockReset();
+    });
+
+    it('passes actorId=null (not payment.projectId) for system-initiated webhook transitions', async () => {
+      vi.spyOn(paypalClient, 'verifyWebhookSignature').mockResolvedValueOnce({
+        verificationStatus: 'SUCCESS',
+      });
+
+      const payment = createPaymentRecord({
+        milestoneId: 'ms-003',
+        milestoneTitle: 'PayPal Sandbox Payment Gateway Integration',
+        projectId: 'proj-001',
+        projectName: 'E-Commerce Platform Redesign & Implementation',
+        amount: 2500,
+        currency: 'USD',
+        paypalOrderId: 'ORD-AUTH-ACTOR',
+      });
+      payment.status = 'ORDER_CREATED';
+
+      await request(app)
+        .post('/api/webhooks/paypal')
+        .set(validHeaders)
+        .send({
+          id: 'WH-EVT-AUTH-ACTOR',
+          event_type: 'PAYMENT.AUTHORIZATION.CREATED',
+          resource: {
+            id: 'AUTH-ACTOR',
+            status: 'CREATED',
+            amount: { currency_code: 'USD', value: '2500.00' },
+            supplementary_data: { related_ids: { order_id: 'ORD-AUTH-ACTOR' } },
+          },
+        });
+
+      expect(mockDbRecordPaymentTransition).toHaveBeenCalledTimes(1);
+      // mock.calls[0][0] is serviceClient; mock.calls[0][1] is the input object
+      const callArgs = mockDbRecordPaymentTransition.mock.calls[0][1];
+      // actorId must be NULL (system actor), NOT payment.projectId ('proj-001').
+      // The bug was passing a contract UUID as actorId, which violates the
+      // profiles.id foreign key in audit_events.
+      expect(callArgs.actorId).toBeNull();
+      expect(callArgs.actorId).not.toBe('proj-001');
+      expect(callArgs.actorRole).toBe('system');
     });
   });
 

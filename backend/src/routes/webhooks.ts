@@ -214,7 +214,7 @@ async function reconcilePaymentTransition(params: {
       await dbRecordPaymentTransition(serviceClient, {
         paymentId: payment.id,
         newStatus,
-        actorId: payment.projectId, // Scoped to contract system
+        actorId: null, // System-initiated transition: no human actor (FK to profiles.id)
         actorRole: 'system',
         action,
         payload: details,
