@@ -374,6 +374,164 @@ describe('PayPal Sandbox Payment Lifecycle (Milestone 2A)', () => {
       expect(updated?.auditTrail.some((e) => e.action === 'DUPLICATE_CAPTURE_PREVENTED')).toBe(true);
     });
 
+    // ── F-7: Atomic Transitions & Idempotency ─────────────────────────
+
+    it('F-7: concurrent captures on one authorization produce exactly one successful capture', async () => {
+      const payment = createPaymentRecord({
+        milestoneId: 'ms-003',
+        milestoneTitle: 'PayPal Sandbox Payment Gateway Integration',
+        projectId: 'proj-001',
+        projectName: 'E-Commerce Platform Redesign & Implementation',
+        amount: 2500,
+        currency: 'USD',
+        paypalOrderId: 'ORD-CONCURRENT-CAP',
+      });
+      payment.status = 'AUTHORIZED';
+      payment.paypalAuthorizationId = 'AUTH-CONCURRENT-CAP';
+
+      let captureCallCount = 0;
+      const mockFetch = vi.fn();
+      globalThis.fetch = mockFetch;
+
+      mockFetch.mockImplementation(() => {
+        captureCallCount++;
+        if (captureCallCount === 1) {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: async () => ({
+              access_token: 'token',
+              token_type: 'Bearer',
+              expires_in: 3600,
+            }),
+          });
+        }
+        return Promise.resolve({
+          ok: true,
+          status: 201,
+          json: async () => ({
+            id: 'CAP-CONCURRENT-001',
+            status: 'COMPLETED',
+            amount: { currency_code: 'USD', value: '2500.00' },
+          }),
+        });
+      });
+
+      const results = await Promise.all(
+        Array.from({ length: 5 }, () =>
+          request(app)
+            .post('/api/payments/paypal/authorizations/AUTH-CONCURRENT-CAP/capture')
+            .send({ confirmed: true })
+        )
+      );
+
+      const successCount = results.filter((r) => r.status === 200).length;
+      const conflictCount = results.filter((r) => r.status === 409).length;
+
+      expect(successCount).toBe(1);
+      expect(conflictCount).toBe(4);
+
+      const updated = getPaymentByAuthorizationId('AUTH-CONCURRENT-CAP');
+      expect(updated?.status).toBe('CAPTURED');
+    });
+
+    it('F-7: idempotent capture retry returns 409 without calling PayPal again', async () => {
+      const payment = createPaymentRecord({
+        milestoneId: 'ms-003',
+        milestoneTitle: 'PayPal Sandbox Payment Gateway Integration',
+        projectId: 'proj-001',
+        projectName: 'E-Commerce Platform Redesign & Implementation',
+        amount: 2500,
+        currency: 'USD',
+        paypalOrderId: 'ORD-IDEMPOTENT',
+      });
+      payment.status = 'CAPTURED';
+      payment.paypalAuthorizationId = 'AUTH-IDEMPOTENT';
+      payment.paypalCaptureId = 'CAP-EXISTING';
+
+      let paypalCallCount = 0;
+      const mockFetch = vi.fn();
+      globalThis.fetch = mockFetch;
+      mockFetch.mockImplementation(() => {
+        paypalCallCount++;
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            access_token: 'mock-token',
+            token_type: 'Bearer',
+            expires_in: 3600,
+          }),
+        });
+      });
+
+      const res = await request(app)
+        .post('/api/payments/paypal/authorizations/AUTH-IDEMPOTENT/capture')
+        .send({
+          confirmed: true,
+          idempotencyKey: 'cap-idempotent-retry',
+        });
+
+      expect(res.status).toBe(409);
+      expect(res.body.message).toContain('has already been captured');
+      expect(paypalCallCount).toBe(0);
+    });
+
+    it('F-7: server-side idempotency key reuse is rejected', async () => {
+      const payment = createPaymentRecord({
+        milestoneId: 'ms-003',
+        milestoneTitle: 'PayPal Sandbox Payment Gateway Integration',
+        projectId: 'proj-001',
+        projectName: 'E-Commerce Platform Redesign & Implementation',
+        amount: 2500,
+        currency: 'USD',
+        paypalOrderId: 'ORD-IDEMP-KEY',
+      });
+      payment.status = 'AUTHORIZED';
+      payment.paypalAuthorizationId = 'AUTH-IDEMP-KEY';
+
+      let paypalCallCount = 0;
+      const mockFetch = vi.fn();
+      globalThis.fetch = mockFetch;
+      mockFetch.mockImplementation(() => {
+        paypalCallCount++;
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            access_token: 'mock-token',
+            token_type: 'Bearer',
+            expires_in: 3600,
+          }),
+        });
+      });
+
+      const res1 = await request(app)
+        .post('/api/payments/paypal/authorizations/AUTH-IDEMP-KEY/capture')
+        .send({
+          confirmed: true,
+          idempotencyKey: 'cap-server-side-key-001',
+        });
+      expect(res1.status).toBe(200);
+
+      // Record PayPal call count after the first (successful) capture.
+      // The first capture makes 2 fetch calls (OAuth token + capture endpoint).
+      const callsAfterFirstCapture = paypalCallCount;
+      expect(callsAfterFirstCapture).toBeGreaterThan(0);
+
+      // Second capture with SAME idempotency key should be rejected WITHOUT calling PayPal.
+      const res2 = await request(app)
+        .post('/api/payments/paypal/authorizations/AUTH-IDEMP-KEY/capture')
+        .send({
+          confirmed: true,
+          idempotencyKey: 'cap-server-side-key-001',
+        });
+
+      // PayPal call count must NOT increase (second request short-circuits before PayPal).
+      expect(paypalCallCount).toBe(callsAfterFirstCapture);
+      expect(res2.status).toBe(409);
+    });
+
     it('rejects capture when payment is in VOIDED state', async () => {
       const payment = createPaymentRecord({
         milestoneId: 'ms-003',
