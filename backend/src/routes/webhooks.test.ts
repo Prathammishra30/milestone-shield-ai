@@ -7,8 +7,15 @@ import {
   getPaymentById,
   getPaymentByOrderId,
   getPaymentByAuthorizationId,
+  updatePaymentStatus,
 } from '../services/paymentStore';
-import { resetWebhookEventStore } from '../services/webhookEventStore';
+import {
+  resetWebhookEventStore,
+  isEventAlreadyProcessed,
+  claimWebhookEventForReprocessing,
+  recordWebhookEvent,
+  WebhookEventStatus,
+} from '../services/webhookEventStore';
 import { resetMilestonesStore, getMilestoneById } from '../models/milestones';
 import { paypalClient } from '../services/paypalClient';
 import { env } from '../config/env';
@@ -174,13 +181,26 @@ describe('PayPal Webhook Signature Verification & Lifecycle Reconciliation (Mile
         verificationStatus: 'SUCCESS',
       });
 
+      // Create a matching payment so the event reconciles instead of being unmatched
+      const payment = createPaymentRecord({
+        milestoneId: 'ms-001',
+        milestoneTitle: 'UI Architecture',
+        projectId: 'prj-001',
+        projectName: 'Web App',
+        amount: 2500,
+        currency: 'USD',
+        paypalOrderId: 'ORD-OK-001',
+      });
+      payment.status = 'AUTHORIZED';
+      payment.paypalAuthorizationId = 'CAP-NONEXISTENT';
+
       const res = await request(app)
         .post('/api/webhooks/paypal')
         .set(validHeaders)
         .send({
           id: 'WH-EVT-OK-001',
           event_type: 'PAYMENT.CAPTURE.COMPLETED',
-          resource: { id: 'CAP-NONEXISTENT' },
+          resource: { id: 'CAP-NONEXISTENT', parent_payment: 'CAP-NONEXISTENT' },
         });
 
       expect(res.status).toBe(200);
@@ -194,6 +214,17 @@ describe('PayPal Webhook Signature Verification & Lifecycle Reconciliation (Mile
     it('acknowledges duplicate webhook deliveries with 200 without duplicate transitions', async () => {
       vi.spyOn(paypalClient, 'verifyWebhookSignature').mockResolvedValue({
         verificationStatus: 'SUCCESS',
+      });
+
+      // Create a matching payment so the first delivery reconciles (not unmatched)
+      createPaymentRecord({
+        milestoneId: 'ms-001',
+        milestoneTitle: 'UI Architecture',
+        projectId: 'prj-001',
+        projectName: 'Web App',
+        amount: 2500,
+        currency: 'USD',
+        paypalOrderId: 'ORD-DUP-001',
       });
 
       const payload = {
@@ -484,6 +515,165 @@ describe('PayPal Webhook Signature Verification & Lifecycle Reconciliation (Mile
     });
   });
 
+  // ── 8. F-1 Regression: Webhook Event Loss & Reprocessing ───────────
+
+  describe('F-1: Webhook event reprocessing after failure', () => {
+    it('does NOT treat received/failed/unmatched statuses as already processed (only processed/ignored are final)', () => {
+      resetWebhookEventStore();
+
+      const record = (paypalEventId: string, status: WebhookEventStatus) =>
+        recordWebhookEvent({
+          id: `wh-${paypalEventId}`,
+          paypalEventId,
+          eventType: 'TEST',
+          status,
+          receivedAt: new Date().toISOString(),
+        });
+
+      recordWebhookEvent({ id: 'wh-r', paypalEventId: 'EVT-RECEIVED', eventType: 'TEST', status: 'received', receivedAt: new Date().toISOString() });
+      recordWebhookEvent({ id: 'wh-f', paypalEventId: 'EVT-FAILED', eventType: 'TEST', status: 'failed', receivedAt: new Date().toISOString() });
+      recordWebhookEvent({ id: 'wh-u', paypalEventId: 'EVT-UNMATCHED', eventType: 'TEST', status: 'unmatched', receivedAt: new Date().toISOString() });
+      recordWebhookEvent({ id: 'wh-p', paypalEventId: 'EVT-PROCESSED', eventType: 'TEST', status: 'processed', receivedAt: new Date().toISOString() });
+      recordWebhookEvent({ id: 'wh-i', paypalEventId: 'EVT-IGNORED', eventType: 'TEST', status: 'ignored', receivedAt: new Date().toISOString() });
+
+      expect(isEventAlreadyProcessed('EVT-RECEIVED')).toBe(false);
+      expect(isEventAlreadyProcessed('EVT-FAILED')).toBe(false);
+      expect(isEventAlreadyProcessed('EVT-UNMATCHED')).toBe(false);
+      expect(isEventAlreadyProcessed('EVT-PROCESSED')).toBe(true);
+      expect(isEventAlreadyProcessed('EVT-IGNORED')).toBe(true);
+    });
+
+    it('claimWebhookEventForReprocessing claims exactly once and rejects processed/processing events', () => {
+      resetWebhookEventStore();
+
+      // Non-existent event: claimable (new)
+      expect(claimWebhookEventForReprocessing('EVT-NEW-001')).toBe(true);
+
+      // Record as failed, then claim
+      recordWebhookEvent({
+        id: 'wh-c',
+        paypalEventId: 'EVT-FAILED-CLAIM',
+        eventType: 'TEST',
+        status: 'failed',
+        receivedAt: new Date().toISOString(),
+      });
+      expect(claimWebhookEventForReprocessing('EVT-FAILED-CLAIM')).toBe(true); // claims it → sets to 'processing'
+      expect(claimWebhookEventForReprocessing('EVT-FAILED-CLAIM')).toBe(false); // now 'processing', cannot claim again
+
+      // Already processed cannot be claimed
+      recordWebhookEvent({
+        id: 'wh-c2',
+        paypalEventId: 'EVT-ALREADY-DONE',
+        eventType: 'TEST',
+        status: 'processed',
+        receivedAt: new Date().toISOString(),
+      });
+      expect(claimWebhookEventForReprocessing('EVT-ALREADY-DONE')).toBe(false);
+    });
+
+    it('retains an unmatched event (no local payment) as unmatched and allows retry', async () => {
+      vi.spyOn(paypalClient, 'verifyWebhookSignature').mockResolvedValueOnce({
+        verificationStatus: 'SUCCESS',
+      });
+
+      const res = await request(app)
+        .post('/api/webhooks/paypal')
+        .set(validHeaders)
+        .send({
+          id: 'WH-EVT-UNMATCHED-001',
+          event_type: 'PAYMENT.CAPTURE.COMPLETED',
+          resource: { id: 'CAP-NO-MATCH-ANYWHERE' },
+        });
+
+      expect(res.status).toBe(202);
+      expect(res.body.status).toBe('unmatched');
+      expect(res.body.message).toMatch(/no matching payment/i);
+
+      // Retry: same event id, now in 'unmatched' state → must NOT be DUPLICATE_EVENT_IGNORED
+      vi.spyOn(paypalClient, 'verifyWebhookSignature').mockResolvedValueOnce({
+        verificationStatus: 'SUCCESS',
+      });
+      const resRetry = await request(app)
+        .post('/api/webhooks/paypal')
+        .set(validHeaders)
+        .send({
+          id: 'WH-EVT-UNMATCHED-001',
+          event_type: 'PAYMENT.CAPTURE.COMPLETED',
+          resource: { id: 'CAP-NO-MATCH-ANYWHERE' },
+        });
+      expect(resRetry.status).toBe(202);
+      expect(resRetry.body.status).toBe('unmatched');
+    });
+
+    it('retries a previously failed event instead of returning DUPLICATE_EVENT_IGNORED', async () => {
+      // Simulate a prior processing failure: event is in 'failed' state
+      resetWebhookEventStore();
+      recordWebhookEvent({
+        id: 'wh-failed-retry',
+        paypalEventId: 'WH-EVT-FAILED-RETRY-001',
+        eventType: 'PAYMENT.CAPTURE.COMPLETED',
+        status: 'failed',
+        receivedAt: new Date().toISOString(),
+        errorMessage: 'Simulated prior failure',
+      });
+
+      vi.spyOn(paypalClient, 'verifyWebhookSignature').mockResolvedValueOnce({
+        verificationStatus: 'SUCCESS',
+      });
+
+      const res = await request(app)
+        .post('/api/webhooks/paypal')
+        .set(validHeaders)
+        .send({
+          id: 'WH-EVT-FAILED-RETRY-001',
+          event_type: 'PAYMENT.CAPTURE.COMPLETED',
+          resource: { id: 'CAP-RETRY-001' },
+        });
+
+      // Must NOT be DUPLICATE_EVENT_IGNORED; should be reprocessed (unmatched since no payment)
+      expect(res.status).toBe(202);
+      expect(res.body.status).toBe('unmatched');
+    });
+
+    it('processes exactly once under concurrent delivery (one success, one DUPLICATE_EVENT_IGNORED)', async () => {
+      vi.spyOn(paypalClient, 'verifyWebhookSignature').mockResolvedValue({
+        verificationStatus: 'SUCCESS',
+      });
+
+      // Create a matching payment so the event causes a state transition
+      createPaymentRecord({
+        milestoneId: 'ms-001',
+        milestoneTitle: 'UI Architecture',
+        projectId: 'prj-001',
+        projectName: 'Web App',
+        amount: 2500,
+        currency: 'USD',
+        paypalOrderId: 'ORD-CONCURRENT-001',
+      });
+
+      const payload = {
+        id: 'WH-EVT-CONCURRENT-001',
+        event_type: 'PAYMENT.AUTHORIZATION.CREATED',
+        resource: {
+          id: 'AUTH-CONCURRENT-001',
+          status: 'CREATED',
+          supplementary_data: { related_ids: { order_id: 'ORD-CONCURRENT-001' } },
+        },
+      };
+
+      const [res1, res2] = await Promise.all([
+        request(app).post('/api/webhooks/paypal').set(validHeaders).send(payload),
+        request(app).post('/api/webhooks/paypal').set(validHeaders).send(payload),
+      ]);
+
+      const codes = [res1.body.code, res2.body.code].sort();
+      // One succeeds (no code property → undefined), the other is DUPLICATE_EVENT_IGNORED
+      expect(codes).toContain('DUPLICATE_EVENT_IGNORED');
+      expect(codes).toContain(undefined);
+      expect(codes.length).toBe(2);
+    });
+  });
+
   // ── 8. Unsupported Event Types ────────────────────────────────────
 
   describe('Unsupported Event Handling', () => {
@@ -527,6 +717,17 @@ describe('PayPal Webhook Signature Verification & Lifecycle Reconciliation (Mile
     it('proves validly signed events can reach the webhook handler without a user JWT', async () => {
       vi.spyOn(paypalClient, 'verifyWebhookSignature').mockResolvedValueOnce({
         verificationStatus: 'SUCCESS',
+      });
+
+      // Create a matching payment so the event reconciles (not unmatched)
+      createPaymentRecord({
+        milestoneId: 'ms-001',
+        milestoneTitle: 'UI Architecture',
+        projectId: 'prj-001',
+        projectName: 'Web App',
+        amount: 2500,
+        currency: 'USD',
+        paypalOrderId: 'ORD-NO-JWT',
       });
 
       const res = await request(app)

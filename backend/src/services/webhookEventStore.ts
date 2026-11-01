@@ -12,7 +12,7 @@
 
 import { SupabaseClient } from '@supabase/supabase-js';
 
-export type WebhookEventStatus = 'received' | 'processed' | 'ignored' | 'failed';
+export type WebhookEventStatus = 'received' | 'processing' | 'processed' | 'ignored' | 'failed' | 'unmatched';
 
 export interface WebhookEventRecord {
   id: string;
@@ -36,12 +36,15 @@ const processedEvents = new Map<string, WebhookEventRecord>();
 
 /**
  * Checks if a webhook event ID has already been received/processed.
+ *
+ * SAFETY: Only 'processed' and 'ignored' are final/terminal states.
+ * 'received', 'failed', and 'unmatched' are NOT final — they must be
+ * reprocessable so PayPal retries are not permanently discarded.
  */
 export function isEventAlreadyProcessed(paypalEventId: string): boolean {
   const existing = processedEvents.get(paypalEventId);
   if (!existing) return false;
-  // Consider 'received' and 'processed' as already handled (at-most-once)
-  return existing.status === 'processed' || existing.status === 'received';
+  return existing.status === 'processed' || existing.status === 'ignored';
 }
 
 /**
@@ -49,6 +52,33 @@ export function isEventAlreadyProcessed(paypalEventId: string): boolean {
  */
 export function recordWebhookEvent(event: WebhookEventRecord): void {
   processedEvents.set(event.paypalEventId, event);
+}
+
+/**
+ * Checks whether a webhook event ID is already tracked in the in-memory store.
+ */
+export function hasWebhookEvent(paypalEventId: string): boolean {
+  return processedEvents.has(paypalEventId);
+}
+/**
+ * Atomically claims a webhook event for (re)processing.
+ *
+ * Returns true if this caller may process the event. Returns false if:
+ * - the event is already 'processed' or 'ignored' (final states), or
+ * - the event is currently 'processing' by another concurrent delivery.
+ *
+ * For new events (not yet in the store), returns true (caller should record it).
+ * For 'received' / 'failed' / 'unmatched' events, transitions to 'processing'
+ * and returns true, ensuring exactly-one processing under concurrent retries.
+ */
+export function claimWebhookEventForReprocessing(paypalEventId: string): boolean {
+  const existing = processedEvents.get(paypalEventId);
+  if (!existing) return true; // New event, safe to process
+  if (existing.status === 'processed' || existing.status === 'ignored') return false;
+  if (existing.status === 'processing') return false;
+  // received / failed / unmatched: claim for reprocessing
+  existing.status = 'processing';
+  return true;
 }
 
 /**
@@ -117,6 +147,33 @@ export async function dbTryRecordWebhookEvent(
   }
 
   return { isNew: true, id: data?.id };
+}
+
+/**
+ * Atomically claims a webhook event in PostgreSQL for (re)processing.
+ *
+ * Uses UPDATE ... WHERE status IN ('received','failed','unmatched') so that
+ * only one concurrent delivery can claim and process the event. Returns
+ * { claimed: true } if this caller won the race, { claimed: false } if the
+ * event is in a final state ('processed'/'ignored') or is already 'processing'.
+ */
+export async function dbClaimWebhookEventForReprocessing(
+  serviceClient: SupabaseClient,
+  paypalEventId: string
+): Promise<{ claimed: boolean; id?: string }> {
+  const { data, error } = await serviceClient
+    .from('webhook_events')
+    .update({ status: 'processing', processed_at: new Date().toISOString() })
+    .eq('paypal_event_id', paypalEventId)
+    .in('status', ['received', 'failed', 'unmatched'])
+    .select('id')
+    .single();
+
+  if (error) {
+    // No rows matched (not in reprocessable state, or doesn't exist yet)
+    return { claimed: false };
+  }
+  return { claimed: true, id: data?.id };
 }
 
 /**
