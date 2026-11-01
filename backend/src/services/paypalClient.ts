@@ -481,16 +481,12 @@ class PayPalClient {
           // Response body was not JSON
         }
 
-        const debugId = errorData?.debug_id ? ` (PayPal Debug ID: ${errorData.debug_id})` : '';
-        const detailMsg = errorData?.details?.[0]
-          ? ` - ${errorData.details[0].issue}: ${errorData.details[0].description}`
-          : '';
         const summary = errorData?.message || errorData?.name || `HTTP ${response.status}`;
 
-        throw new AppError(
-          `PayPal Sandbox API error: ${summary}${detailMsg}${debugId}`,
-          response.status >= 500 ? 502 : response.status,
-        );
+        // F-12: Sanitize error messages - never leak PayPal Debug ID or
+        // detailed issue/description to clients. Log server-side instead.
+        console.error('PayPal API error:', errorData);
+        throw new AppError(`PayPal Sandbox API error: ${summary}`, response.status >= 500 ? 502 : response.status);
       }
 
       return (await response.json()) as T;
