@@ -47,8 +47,15 @@ describe('PayPal Webhook Signature Verification & Lifecycle Reconciliation (Mile
   // ── 1. Configuration & Credential Guards ──────────────────────────
 
   describe('Configuration Guards', () => {
-    it('fails safely with HTTP 500 if PAYPAL_WEBHOOK_ID is not configured', async () => {
+    const originalNodeEnv = env.NODE_ENV;
+
+    afterEach(() => {
+      env.NODE_ENV = originalNodeEnv;
+    });
+
+    it('fails safely with HTTP 500 if PAYPAL_WEBHOOK_ID is not configured (non-production: generic message, no env leak)', async () => {
       env.PAYPAL_WEBHOOK_ID = '';
+      env.NODE_ENV = 'test';
 
       const res = await request(app)
         .post('/api/webhooks/paypal')
@@ -60,7 +67,29 @@ describe('PayPal Webhook Signature Verification & Lifecycle Reconciliation (Mile
         });
 
       expect(res.status).toBe(500);
-      expect(res.body.message).toMatch(/PAYPAL_WEBHOOK_ID is not configured/i);
+      // Must NOT leak env var names or file paths
+      expect(res.body.message).not.toMatch(/PAYPAL_WEBHOOK_ID/i);
+      expect(res.body.message).not.toMatch(/\.env/i);
+      expect(res.body.message).not.toMatch(/backend\//i);
+    });
+
+    it('returns generic message in production when PAYPAL_WEBHOOK_ID is not configured', async () => {
+      env.PAYPAL_WEBHOOK_ID = '';
+      env.NODE_ENV = 'production';
+
+      const res = await request(app)
+        .post('/api/webhooks/paypal')
+        .set(validHeaders)
+        .send({
+          id: 'WH-EVT-001',
+          event_type: 'PAYMENT.AUTHORIZATION.CREATED',
+          resource: { id: 'AUTH-123' },
+        });
+
+      expect(res.status).toBe(500);
+      expect(res.body.message).not.toMatch(/PAYPAL_WEBHOOK_ID/i);
+      expect(res.body.message).not.toMatch(/\.env/i);
+      expect(res.body.message).not.toMatch(/backend\//i);
     });
   });
 

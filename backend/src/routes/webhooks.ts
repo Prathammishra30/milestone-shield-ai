@@ -245,10 +245,10 @@ router.post(
       // 1. Check Webhook ID Configuration
       const configuredWebhookId = env.PAYPAL_WEBHOOK_ID?.trim();
       if (!configuredWebhookId) {
-        throw new AppError(
-          'PayPal webhook verification failed: PAYPAL_WEBHOOK_ID is not configured in backend/.env.',
-          500
+        console.error(
+          'Webhook configuration error: PAYPAL_WEBHOOK_ID is not configured in backend/.env.'
         );
+        throw new AppError('Webhook verification is not configured. Contact support.', 500);
       }
 
       // 2. Verify Required PayPal Transmission Headers
