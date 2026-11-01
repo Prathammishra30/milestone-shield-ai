@@ -66,8 +66,9 @@ export async function authenticateToken(token: string): Promise<AuthenticatedUse
 
   const isTest =
     (process.env.NODE_ENV === 'test' || process.env.VITEST === 'true' || env.NODE_ENV === 'test') &&
-    env.NODE_ENV !== 'production';
-  // 1. Support deterministic test tokens in test environment
+    env.NODE_ENV !== 'production' &&
+    env.AUTH_BYPASS_ENABLED;
+  // 1. Support deterministic test tokens in test environment (explicit opt-in only)
   if (isTest && token.startsWith('test-token:')) {
     const parts = token.split(':');
     // Format: test-token:<userId>:<role>:<email>:<flag>
@@ -153,8 +154,8 @@ export async function authenticateToken(token: string): Promise<AuthenticatedUse
   }
 
   // 4. In development without Supabase credentials, fail safely with actionable instructions
-  if (env.NODE_ENV === 'development') {
-    // If a mock dev header is provided in development for local testing
+  if (env.NODE_ENV === 'development' && env.AUTH_BYPASS_ENABLED) {
+    // If a mock dev header is provided in development for local testing (explicit opt-in only)
     if (token.startsWith('dev-token:')) {
       const parts = token.split(':');
       const id = parts[1] || 'usr-client-001';
@@ -177,7 +178,8 @@ export async function requireAuth(req: Request, _res: Response, next: NextFuncti
   if (!authHeader) {
     const isTest =
     (process.env.NODE_ENV === 'test' || process.env.VITEST === 'true' || env.NODE_ENV === 'test') &&
-    env.NODE_ENV !== 'production';
+    env.NODE_ENV !== 'production' &&
+    env.AUTH_BYPASS_ENABLED;
     if (isTest && !req.headers['x-test-no-auth']) {
       req.user = {
         id: 'usr-client-001',

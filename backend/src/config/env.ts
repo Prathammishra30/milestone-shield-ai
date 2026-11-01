@@ -79,6 +79,18 @@ export const envSchema = z.object({
   REDIS_URL: z.string().url().optional(),
   ALLOW_IN_MEMORY_STORES: z.coerce.boolean().default(false),
 
+  // Auth bypass — explicit opt-in required in production;
+  // enabled by default only in non-production for local development/testing.
+  AUTH_BYPASS_ENABLED: z.preprocess(
+    (val) => {
+      if (val === undefined || val === '' || val === null) {
+        return process.env.NODE_ENV !== 'production';
+      }
+      return val;
+    },
+    z.coerce.boolean()
+  ),
+
   // Future: Anthropic
   ANTHROPIC_API_KEY: z.string().optional(),
 
@@ -173,6 +185,15 @@ export const envSchema = z.object({
         code: z.ZodIssueCode.custom,
         path: ['ALLOW_IN_MEMORY_STORES'],
         message: 'ALLOW_IN_MEMORY_STORES must be false in production. In-memory storage is strictly forbidden in production.',
+      });
+    }
+
+    // Auth bypass must never be enabled in production
+    if (data.NODE_ENV === 'production' && data.AUTH_BYPASS_ENABLED) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['AUTH_BYPASS_ENABLED'],
+        message: 'AUTH_BYPASS_ENABLED must be false in production. Authentication bypasses (test-token, dev-token, auto-auth) are forbidden in production.',
       });
     }
 
