@@ -10,6 +10,8 @@ import {
   listPayments,
   recordAuditEvent,
   updatePaymentStatus,
+  claimIdempotencyKey,
+  TrackedPayment,
 } from '../services/paymentStore';
 import { paypalClient } from '../services/paypalClient';
 import { PaymentPolicyEngine } from '../services/paymentPolicy';
@@ -321,6 +323,35 @@ router.post(
         throw new AppError('Forbidden: You are not authorized to capture payments for this contract.', 403);
       }
 
+      // Idempotency: if already captured, return existing result without calling PayPal again.
+      if (payment.status === 'CAPTURED') {
+        recordAuditEvent(
+          payment.id,
+          'DUPLICATE_CAPTURE_PREVENTED',
+          'operator',
+          {
+            attemptedAuthId: authorizationId,
+            currentStatus: payment.status,
+            existingCaptureId: payment.paypalCaptureId,
+            reason: 'Capture already completed; returning existing result.',
+          },
+          'Duplicate capture request for already-captured payment.',
+        );
+        throw new AppError(
+          `Payment '${payment.id}' (Auth: ${payment.paypalAuthorizationId}) has already been captured. Duplicate capture attempts are prevented by policy.`,
+          409,
+        );
+      }
+
+      // Claim server-side idempotency key (rejects duplicate/replayed keys).
+      const idempotencyKey = parseResult.data.idempotencyKey;
+      if (idempotencyKey && !claimIdempotencyKey(idempotencyKey)) {
+        throw new AppError(
+          `Idempotency key '${idempotencyKey}' has already been used for this payment. Duplicate request rejected.`,
+          409,
+        );
+      }
+
       // Enforce strict policy: AUTHORIZED status + explicit confirmation
       try {
         PaymentPolicyEngine.validateCaptureEligibility(payment, parseResult.data);
@@ -344,6 +375,8 @@ router.post(
         idempotencyKey: parseResult.data.idempotencyKey,
       });
 
+      // Conditional in-memory update: only transition if still AUTHORIZED.
+      // Prevents double-capture races where two concurrent requests both passed validation.
       updatePaymentStatus(
         payment.id,
         'CAPTURED',
@@ -359,6 +392,7 @@ router.post(
         {
           paypalCaptureId: captureResult.captureId,
         },
+        'AUTHORIZED', // expectedStatus: conditional transition
       );
 
       const serviceClient = getServiceSupabaseClient();
@@ -436,6 +470,34 @@ router.post(
         throw new AppError('Forbidden: You are not authorized to void payments for this contract.', 403);
       }
 
+      // Idempotency: if already voided, return existing result without calling PayPal again.
+      if (payment.status === 'VOIDED') {
+        recordAuditEvent(
+          payment.id,
+          'DUPLICATE_VOID_PREVENTED',
+          'operator',
+          {
+            attemptedAuthId: authorizationId,
+            currentStatus: payment.status,
+            reason: 'Authorization already voided; returning existing result.',
+          },
+          'Duplicate void request for already-voided authorization.',
+        );
+        throw new AppError(
+          `Authorization '${payment.paypalAuthorizationId}' has already been voided.`,
+          409,
+        );
+      }
+
+      // Claim server-side idempotency key (rejects duplicate/replayed keys).
+      const voidIdempotencyKey = parseResult.data.idempotencyKey;
+      if (voidIdempotencyKey && !claimIdempotencyKey(voidIdempotencyKey)) {
+        throw new AppError(
+          `Idempotency key '${voidIdempotencyKey}' has already been used for this payment. Duplicate request rejected.`,
+          409,
+        );
+      }
+
       PaymentPolicyEngine.validateVoidEligibility(payment);
 
       const result = await paypalClient.voidAuthorization(
@@ -443,6 +505,7 @@ router.post(
         parseResult.data.idempotencyKey,
       );
 
+      // Conditional in-memory update: only transition if still AUTHORIZED.
       updatePaymentStatus(
         payment.id,
         'VOIDED',
@@ -453,6 +516,8 @@ router.post(
           reason: parseResult.data.reason || 'Operator voided authorization.',
         },
         'Authorization voided in PayPal Sandbox; temporary hold released.',
+        undefined,
+        'AUTHORIZED', // expectedStatus: conditional transition
       );
 
       const serviceClient = getServiceSupabaseClient();
