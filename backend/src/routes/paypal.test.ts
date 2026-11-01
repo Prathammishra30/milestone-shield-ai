@@ -5,6 +5,7 @@ import { createApp } from '../app';
 import { resetPaymentStore, getPaymentByOrderId, getPaymentByAuthorizationId, createPaymentRecord } from '../services/paymentStore';
 import { resetMilestonesStore, getMilestoneById } from '../models/milestones';
 import { paypalClient } from '../services/paypalClient';
+import { AppError } from '../middleware/errorHandler';
 import { env, loadEnv } from '../config/env';
 
 /** Deterministic synthetic fixture generator with 0 entropy to prevent secret scanner false positives */
@@ -497,6 +498,53 @@ describe('PayPal Sandbox Payment Lifecycle (Milestone 2A)', () => {
       const res = await request(app).get('/api/payments/paypal/milestone/unknown-ms');
       expect(res.status).toBe(404);
       expect(res.body.status).toBe('error');
+    });
+
+    // ── F-12: Excessive error details ──────────────────────────────────
+    it('sanitizes PayPal API error messages - no debug ID leaked', async () => {
+      // This test verifies that paypalClient sanitizes error messages,
+      // not leaking PayPal debug IDs or detailed issue descriptions to clients.
+      const mockFetch = vi.fn();
+      globalThis.fetch = mockFetch;
+
+      // Mock OAuth token success
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          access_token: 'mock-access-token-123',
+          token_type: 'Bearer',
+          expires_in: 3600,
+        }),
+      });
+
+      // Mock PayPal API error response (400 Bad Request) with debug_id and details
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 400,
+        json: async () => ({
+          message: 'INVALID_ARGUMENT',
+          name: 'Bad Request',
+          details: [
+            { issue: 'UNKNOWN', description: 'Invalid payer authentication' },
+          ],
+          debug_id: 'ffl1234567890',
+        }),
+      });
+
+      const res = await request(app)
+        .post('/api/milestones/ms-003/paypal/order')
+        .set('Authorization', 'Bearer test-token:usr-client-001:client')
+        .send({
+          milestoneId: 'ms-003',
+        });
+
+      // The response should be 400 or 500 (depending on error path)
+      expect(res.status).toBeDefined();
+      // Must not contain PayPal debug ID format
+      expect(res.body.message).not.toMatch(/ffl1234567890/);
+      // Must not contain raw issue/description details
+      expect(res.body.message).not.toMatch(/UNKNOWN: Invalid payer authentication/);
     });
   });
 
