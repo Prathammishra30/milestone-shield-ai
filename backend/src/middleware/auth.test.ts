@@ -5,7 +5,7 @@ import { resetContractsStoreForTests } from '../models/contracts';
 import { resetProfilesStoreForTests } from '../routes/users';
 import { resetPaymentStore, createPaymentRecord } from '../services/paymentStore';
 import { resetMilestonesStore } from '../models/milestones';
-import { env } from '../config/env';
+import { env, loadEnv } from '../config/env';
 
 describe('Phase 1: Multi-Tenant Data Isolation and Authorization Security', () => {
   const app = createApp();
@@ -266,9 +266,11 @@ describe('Phase 1: Multi-Tenant Data Isolation and Authorization Security', () =
 
   describe('Security Hardening & Production Safeguards', () => {
     const originalNodeEnv = env.NODE_ENV;
+    const originalAuthBypass = env.AUTH_BYPASS_ENABLED;
 
     afterEach(() => {
       env.NODE_ENV = originalNodeEnv;
+      env.AUTH_BYPASS_ENABLED = originalAuthBypass;
     });
 
     it('STRICTLY rejects test-token: in production environment (HTTP 401)', async () => {
@@ -309,6 +311,63 @@ describe('Phase 1: Multi-Tenant Data Isolation and Authorization Security', () =
 
       expect(res.status).toBe(200);
       expect(res.body.data.role).toBe('client'); // Sanitized to client, NOT admin
+    });
+
+    // ── F-10: Auth bypass fail-safe gating ──────────────────────────
+
+    it('F-10: rejects test-token bypass when AUTH_BYPASS_ENABLED is explicitly false', async () => {
+      env.NODE_ENV = 'test';
+      (env as Record<string, unknown>).AUTH_BYPASS_ENABLED = false;
+
+      const res = await request(app)
+        .get('/api/contracts')
+        .set('Authorization', 'Bearer test-token:usr-client-001:client:alex@example.com');
+
+      expect(res.status).toBe(401);
+    });
+
+    it('F-10: rejects dev-token bypass when AUTH_BYPASS_ENABLED is explicitly false', async () => {
+      env.NODE_ENV = 'development';
+      (env as Record<string, unknown>).AUTH_BYPASS_ENABLED = false;
+
+      const res = await request(app)
+        .get('/api/contracts')
+        .set('Authorization', 'Bearer dev-token:usr-client-001:client');
+
+      expect(res.status).toBe(401);
+    });
+
+    it('F-10: rejects auto-auth (no header) when AUTH_BYPASS_ENABLED is not set', async () => {
+      env.NODE_ENV = 'test';
+
+      const res = await request(app)
+        .get('/api/contracts')
+        .set('x-test-no-auth', 'true');
+
+      expect(res.status).toBe(401);
+      expect(res.body.message).toMatch(/Authentication required/i);
+    });
+
+    it('F-10: accepts test-token when AUTH_BYPASS_ENABLED is explicitly true in test mode', async () => {
+      env.NODE_ENV = 'test';
+      (env as Record<string, unknown>).AUTH_BYPASS_ENABLED = true;
+
+      const res = await request(app)
+        .get('/api/contracts')
+        .set('Authorization', 'Bearer test-token:usr-client-001:client:alex@example.com');
+
+      expect(res.status).toBe(200);
+    });
+
+    it('F-10: env validation rejects NODE_ENV=production with AUTH_BYPASS_ENABLED=true', () => {
+      expect(() => {
+        loadEnv({
+          ...process.env,
+          NODE_ENV: 'production',
+          AUTH_BYPASS_ENABLED: 'true',
+          SUPABASE_JWT_SECRET: 'test-jwt-secret-min-32-chars-long',
+        });
+      }).toThrow(/AUTH_BYPASS_ENABLED|production|bypass/i);
     });
 
     it('forbids freelancer from authorizing PayPal orders (HTTP 403)', async () => {
