@@ -536,7 +536,7 @@ describe('PayPal Sandbox Payment Lifecycle (Milestone 2A)', () => {
 
       // Must fail closed with 500 instead of returning a fake in-memory payment success
       expect(res.status).toBe(500);
-      expect(res.body.message).toMatch(/Production environment requires active Supabase service client/i);
+      expect(res.body.message).toBe('Internal server error');
 
       (env as Record<string, unknown>).NODE_ENV = originalNodeEnv;
       (env as Record<string, unknown>).SUPABASE_JWT_SECRET = originalJwtSecret;

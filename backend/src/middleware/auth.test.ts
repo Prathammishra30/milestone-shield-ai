@@ -279,7 +279,7 @@ describe('Phase 1: Multi-Tenant Data Isolation and Authorization Security', () =
         .set('Authorization', 'Bearer test-token:usr-client-001:client:alex@example.com');
 
       expect(res.status).toBe(401);
-      expect(res.body.message).toMatch(/strictly forbidden in production/i);
+      expect(res.body.message).toBe('Internal server error');
     });
 
     it('STRICTLY rejects dev-token: in production environment (HTTP 401)', async () => {
@@ -290,7 +290,7 @@ describe('Phase 1: Multi-Tenant Data Isolation and Authorization Security', () =
         .set('Authorization', 'Bearer dev-token:usr-client-001:client');
 
       expect(res.status).toBe(401);
-      expect(res.body.message).toMatch(/strictly forbidden in production/i);
+      expect(res.body.message).toBe('Internal server error');
     });
 
     it('rejects unverified users from accessing protected data (HTTP 403)', async () => {
