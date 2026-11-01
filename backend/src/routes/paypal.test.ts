@@ -136,6 +136,92 @@ describe('PayPal Sandbox Payment Lifecycle (Milestone 2A)', () => {
       expect(stored?.auditTrail[0].action).toBe('ORDER_CREATED');
     });
 
+    // ── F-8: Redirect URL Allowlist ─────────────────────────────────
+
+    it('F-8: rejects returnUrl with javascript: scheme', async () => {
+      const res = await request(app)
+        .post('/api/milestones/ms-003/paypal/order')
+        .send({
+          returnUrl: 'javascript:alert(document.cookie)',
+        });
+
+      expect(res.status).toBe(400);
+      expect(res.body.status).toBe('error');
+    });
+
+    it('F-8: rejects returnUrl with http:// (non-HTTPS) external domain', async () => {
+      const res = await request(app)
+        .post('/api/milestones/ms-003/paypal/order')
+        .send({
+          returnUrl: 'http://attacker.evil.com/redirect',
+        });
+
+      expect(res.status).toBe(400);
+      expect(res.body.status).toBe('error');
+    });
+
+    it('F-8: rejects returnUrl with look-alike paypal domain', async () => {
+      const res = await request(app)
+        .post('/api/milestones/ms-003/paypal/order')
+        .send({
+          returnUrl: 'https://paypal.com.evil.io/redirect',
+        });
+
+      expect(res.status).toBe(400);
+      expect(res.body.status).toBe('error');
+    });
+
+    it('F-8: rejects cancelUrl with javascript: scheme', async () => {
+      const res = await request(app)
+        .post('/api/milestones/ms-003/paypal/order')
+        .send({
+          cancelUrl: 'javascript:alert(1)',
+        });
+
+      expect(res.status).toBe(400);
+      expect(res.body.status).toBe('error');
+    });
+
+    it('F-8: accepts returnUrl matching configured frontend origin (CORS_ORIGIN)', async () => {
+      const mockFetch = vi.fn();
+      globalThis.fetch = mockFetch;
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          access_token: 'mock-access-token-123',
+          token_type: 'Bearer',
+          expires_in: 3600,
+        }),
+      });
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        status: 201,
+        json: async () => ({
+          id: 'TEST-ORDER-F8',
+          status: 'CREATED',
+          links: [
+            {
+              rel: 'approve',
+              href: 'https://www.sandbox.paypal.com/checkoutnow?token=TEST-ORDER-F8',
+              method: 'GET',
+            },
+          ],
+        }),
+      });
+
+      const res = await request(app)
+        .post('/api/milestones/ms-003/paypal/order')
+        .send({
+          returnUrl: 'http://localhost:5173/overview?paypal_return=true',
+        });
+
+      expect(res.status).toBe(201);
+      expect(res.body.status).toBe('success');
+    });
+
     it('rejects client-supplied amounts (financial safety check)', async () => {
       const res = await request(app)
         .post('/api/milestones/ms-003/paypal/order')
@@ -506,9 +592,11 @@ describe('PayPal Sandbox Payment Lifecycle (Milestone 2A)', () => {
     it('STRICTLY FAILS CLOSED in production if database client is unavailable', async () => {
       const originalNodeEnv = env.NODE_ENV;
       const originalJwtSecret = env.SUPABASE_JWT_SECRET;
+      const originalCorsOrigin = env.CORS_ORIGIN;
 
       (env as Record<string, unknown>).NODE_ENV = 'production';
       (env as Record<string, unknown>).SUPABASE_JWT_SECRET = fixture('j', 40);
+      (env as Record<string, unknown>).CORS_ORIGIN = 'https://app.milestoneshield.ai';
 
       const validToken = jwt.sign(
         {
@@ -540,6 +628,7 @@ describe('PayPal Sandbox Payment Lifecycle (Milestone 2A)', () => {
 
       (env as Record<string, unknown>).NODE_ENV = originalNodeEnv;
       (env as Record<string, unknown>).SUPABASE_JWT_SECRET = originalJwtSecret;
+      (env as Record<string, unknown>).CORS_ORIGIN = originalCorsOrigin;
     });
   });
 });

@@ -26,6 +26,7 @@ import {
   dbGetPaymentByMilestoneId,
   assertDatabaseReadinessForPayments,
 } from '../db';
+import { isSafePublicHttpsUrl } from '../utils/urlValidator';
 import { env } from '../config/env';
 
 const router = Router();
@@ -47,6 +48,28 @@ const createOrderBodySchema = z
   .refine((data) => data.amount === undefined, {
     message:
       'Client-supplied amounts are strictly forbidden. The milestone payment amount is derived from trusted server-side milestone data.',
+  })
+  .refine((data) => {
+    // F-8: Validate redirect URLs against frontend origin allowlist (CORS_ORIGIN)
+    // and SSRF guard. A URL is accepted only if its origin matches the configured
+    // frontend origin, or (when no CORS_ORIGIN is set) is a safe public HTTPS URL.
+    const validateUrl = (url?: string): boolean => {
+      if (!url) return true; // optional field
+      try {
+        const urlOrigin = new URL(url).origin;
+        // Primary: origin must match configured frontend origin
+        if (env.CORS_ORIGIN && urlOrigin === env.CORS_ORIGIN) return true;
+        // Secondary: when no CORS_ORIGIN is configured, fall back to SSRF guard
+        if (!env.CORS_ORIGIN) return isSafePublicHttpsUrl(url);
+        return false;
+      } catch {
+        return false;
+      }
+    };
+    return validateUrl(data.returnUrl) && validateUrl(data.cancelUrl);
+  }, {
+    message:
+      'returnUrl and cancelUrl must point to a safe public HTTPS URL or the configured frontend origin (CORS_ORIGIN).',
   });
 
 const captureBodySchema = z.object({
