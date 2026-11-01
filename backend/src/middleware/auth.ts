@@ -86,7 +86,31 @@ export async function authenticateToken(token: string): Promise<AuthenticatedUse
     return { id, role, email };
   }
 
-  // 2. If JWT secret is configured, attempt signature & claims verification
+  // 2. Verify via Supabase Auth client first (trusted source)
+  //    Priority: Supabase Auth client > JWT claims fallback
+  const supabase = getSupabaseClient();
+  if (supabase) {
+    const { data, error } = await supabase.auth.getUser(token);
+    if (error || !data.user) {
+      throw new AppError('Authentication failed: invalid or expired session token', 401);
+    }
+
+    // Verify email using Supabase's trusted source
+    // Use !decoded.email_confirmed_at pattern to catch both null and undefined/absent
+    if (!data.user.email_confirmed_at && env.NODE_ENV === 'production') {
+      throw new AppError('Email verification required. Please verify your email before accessing protected data.', 403);
+    }
+
+    return {
+      id: data.user.id,
+      email: data.user.email || '',
+      role: resolveSafeRole(data.user.app_metadata?.role, data.user.user_metadata?.role),
+      fullName: data.user.user_metadata?.full_name,
+    };
+  }
+
+  // 3. Fall back to JWT claim verification if SUPABASE_JWT_SECRET configured
+  //    Only use claim-based verification as fallback; prefer Supabase trusted source
   if (env.SUPABASE_JWT_SECRET) {
     try {
       const decoded = jwt.verify(token, env.SUPABASE_JWT_SECRET, {
@@ -110,8 +134,9 @@ export async function authenticateToken(token: string): Promise<AuthenticatedUse
         throw new AppError(`Invalid token audience claim: '${decoded.aud}'`, 401);
       }
 
-      // Block unverified email users
-      if (decoded.email_confirmed_at === null) {
+      // Check email verification using claim (fallback only)
+      // Use !decoded.email_confirmed_at to catch both null and undefined/absent claims
+      if (!decoded.email_confirmed_at && env.NODE_ENV === 'production') {
         throw new AppError('Email verification required. Please verify your email before accessing protected data.', 403);
       }
 
@@ -125,26 +150,6 @@ export async function authenticateToken(token: string): Promise<AuthenticatedUse
       if (jwtErr instanceof AppError) throw jwtErr;
       throw new AppError('Invalid or expired authentication token', 401);
     }
-  }
-
-  // 3. Verify via Supabase Auth client if configured
-  const supabase = getSupabaseClient();
-  if (supabase) {
-    const { data, error } = await supabase.auth.getUser(token);
-    if (error || !data.user) {
-      throw new AppError('Authentication failed: invalid or expired session token', 401);
-    }
-
-    if (!data.user.email_confirmed_at && env.NODE_ENV === 'production') {
-      throw new AppError('Email verification required. Please verify your email before accessing protected data.', 403);
-    }
-
-    return {
-      id: data.user.id,
-      email: data.user.email || '',
-      role: resolveSafeRole(data.user.app_metadata?.role, data.user.user_metadata?.role),
-      fullName: data.user.user_metadata?.full_name,
-    };
   }
 
   // 4. In development without Supabase credentials, fail safely with actionable instructions
