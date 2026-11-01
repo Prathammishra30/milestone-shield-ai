@@ -15,10 +15,13 @@ import {
 } from '../services/paymentStore';
 import {
   isEventAlreadyProcessed,
+  hasWebhookEvent,
   recordWebhookEvent,
   updateWebhookEventStatus,
+  claimWebhookEventForReprocessing,
   dbTryRecordWebhookEvent,
   dbUpdateWebhookEventStatus,
+  dbClaimWebhookEventForReprocessing,
 } from '../services/webhookEventStore';
 import {
   isSupabaseConfigured,
@@ -241,6 +244,8 @@ router.post(
   webhookLimiter,
   async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     let paypalEventId = 'unknown';
+    const serviceClient = getServiceSupabaseClient();
+    let dbWebhookEventId: string | undefined;
     try {
       // 1. Check Webhook ID Configuration
       const configuredWebhookId = env.PAYPAL_WEBHOOK_ID?.trim();
@@ -323,6 +328,7 @@ router.post(
       }
 
       // 6. Idempotency Check & Event Deduplication
+      // Only 'processed' and 'ignored' are final. 'received'/'failed'/'unmatched' are reprocessable.
       if (isEventAlreadyProcessed(paypalEventId)) {
         res.status(200).json({
           status: 'success',
@@ -332,49 +338,69 @@ router.post(
         return;
       }
 
-      const serviceClient = getServiceSupabaseClient();
-      let dbWebhookEventId: string | undefined;
+      // Atomic claim for reprocessing: prevents concurrent duplicate deliveries from both processing.
+      const memoryClaimed = claimWebhookEventForReprocessing(paypalEventId);
+      if (!memoryClaimed) {
+        res.status(200).json({
+          status: 'success',
+          code: 'DUPLICATE_EVENT_IGNORED',
+          message: `Webhook event '${paypalEventId}' is already being processed or is in a final state. Duplicate delivery acknowledged.`,
+        });
+        return;
+      }
 
       if (serviceClient && isSupabaseConfigured()) {
         try {
-          const recordRes = await dbTryRecordWebhookEvent(serviceClient, {
-            paypalEventId,
-            eventType,
-            resourceType: typeof event.resource_type === 'string' ? event.resource_type : undefined,
-            paypalOrderId: typeof resource.id === 'string' ? resource.id : undefined,
-          });
+          // Atomic DB claim: UPDATE ... WHERE status IN ('received','failed','unmatched')
+          const dbClaimed = await dbClaimWebhookEventForReprocessing(serviceClient, paypalEventId);
 
-          if (!recordRes.isNew) {
-            res.status(200).json({
-              status: 'success',
-              code: 'DUPLICATE_EVENT_IGNORED',
-              message: `Webhook event '${paypalEventId}' already recorded in database. Duplicate delivery acknowledged.`,
+          if (dbClaimed.claimed) {
+            dbWebhookEventId = dbClaimed.id;
+          } else {
+            // Event not in a reprocessable state in DB. Try inserting as new (first delivery).
+            const recordRes = await dbTryRecordWebhookEvent(serviceClient, {
+              paypalEventId,
+              eventType,
+              resourceType: typeof event.resource_type === 'string' ? event.resource_type : undefined,
+              paypalOrderId: typeof resource.id === 'string' ? resource.id : undefined,
             });
-            return;
+
+            if (!recordRes.isNew) {
+              res.status(200).json({
+                status: 'success',
+                code: 'DUPLICATE_EVENT_IGNORED',
+                message: `Webhook event '${paypalEventId}' already recorded in database. Duplicate delivery acknowledged.`,
+              });
+              return;
+            }
+            dbWebhookEventId = recordRes.id;
           }
-          dbWebhookEventId = recordRes.id;
         } catch (dbErr) {
           if (env.NODE_ENV === 'production') {
             throw new AppError(
-              `Failed to record webhook event in PostgreSQL: ${dbErr instanceof Error ? dbErr.message : String(dbErr)}`,
+              `Failed to claim/record webhook event in PostgreSQL: ${dbErr instanceof Error ? dbErr.message : String(dbErr)}`,
               500
             );
           }
+          console.warn('[PayPal Webhook] DB claim/record warning (non-prod):', dbErr);
         }
       }
 
-      // Record in in-memory dedup store as received
-      recordWebhookEvent({
-        id: `wh-${Date.now()}`,
-        paypalEventId,
-        eventType,
-        resourceType: typeof event.resource_type === 'string' ? event.resource_type : undefined,
-        status: 'received',
-        receivedAt: new Date().toISOString(),
-      });
+      // Record in in-memory dedup store as received (only if this is a new event).
+      if (!hasWebhookEvent(paypalEventId)) {
+        recordWebhookEvent({
+          id: `wh-${Date.now()}`,
+          paypalEventId,
+          eventType,
+          resourceType: typeof event.resource_type === 'string' ? event.resource_type : undefined,
+          status: 'received',
+          receivedAt: new Date().toISOString(),
+        });
+      }
 
       // 7. Event Reconciliation by Event Type
       const payment = await resolvePaymentRecord(resource);
+      const hadMatchingPayment = !!payment;
 
       switch (eventType) {
         // Buyer approved the order in PayPal Checkout
@@ -528,6 +554,29 @@ router.post(
         }
       }
 
+      // If no local payment matched, retain as unmatched for reconciliation retry (do NOT silently mark processed).
+      if (!hadMatchingPayment) {
+        updateWebhookEventStatus(
+          paypalEventId,
+          'unmatched',
+          'No local payment record matched this webhook event; retained for reconciliation retry.'
+        );
+        if (serviceClient && dbWebhookEventId) {
+          await dbUpdateWebhookEventStatus(
+            serviceClient,
+            dbWebhookEventId,
+            'unmatched',
+            undefined,
+            'No local payment record matched.'
+          );
+        }
+        res.status(202).json({
+          status: 'unmatched',
+          message: `Webhook event '${paypalEventId}' acknowledged but no matching payment found. Retained for reconciliation retry.`,
+        });
+        return;
+      }
+
       // 8. Mark event processed in stores
       updateWebhookEventStatus(
         paypalEventId,
@@ -561,6 +610,15 @@ router.post(
           undefined,
           err instanceof Error ? err.message : String(err)
         );
+        if (serviceClient && dbWebhookEventId) {
+          await dbUpdateWebhookEventStatus(
+            serviceClient,
+            dbWebhookEventId,
+            'failed',
+            undefined,
+            err instanceof Error ? err.message : String(err)
+          );
+        }
       }
       next(err);
     }
