@@ -10,6 +10,8 @@ import {
   listPayments,
   recordAuditEvent,
   updatePaymentStatus,
+  claimIdempotencyKey,
+  TrackedPayment,
 } from '../services/paymentStore';
 import { paypalClient } from '../services/paypalClient';
 import { PaymentPolicyEngine } from '../services/paymentPolicy';
@@ -26,6 +28,7 @@ import {
   dbGetPaymentByMilestoneId,
   assertDatabaseReadinessForPayments,
 } from '../db';
+import { isSafePublicHttpsUrl } from '../utils/urlValidator';
 import { env } from '../config/env';
 
 const router = Router();
@@ -33,6 +36,29 @@ const router = Router();
 function getParamString(param: string | string[] | undefined): string {
   if (Array.isArray(param)) return param[0] || '';
   return param || '';
+}
+
+/**
+ * Middleware: Ensures database readiness for financial operations in production.
+ * Must run BEFORE requireAuth so that DB unavailability returns 500 (fail closed)
+ * instead of an auth error (401/403).
+ */
+function requireDatabaseReadiness(
+  _req: Request,
+  _res: Response,
+  next: NextFunction
+): void {
+  try {
+    assertDatabaseReadinessForPayments();
+    next();
+  } catch (err) {
+    next(
+      new AppError(
+        'Production environment requires active Supabase service client for financial ledger recording. In-memory fallback rejected.',
+        500
+      )
+    );
+  }
 }
 
 // ── Validation Schemas ──────────────────────────────────────────────
@@ -47,6 +73,28 @@ const createOrderBodySchema = z
   .refine((data) => data.amount === undefined, {
     message:
       'Client-supplied amounts are strictly forbidden. The milestone payment amount is derived from trusted server-side milestone data.',
+  })
+  .refine((data) => {
+    // F-8: Validate redirect URLs against frontend origin allowlist (CORS_ORIGIN)
+    // and SSRF guard. A URL is accepted only if its origin matches the configured
+    // frontend origin, or (when no CORS_ORIGIN is set) is a safe public HTTPS URL.
+    const validateUrl = (url?: string): boolean => {
+      if (!url) return true; // optional field
+      try {
+        const urlOrigin = new URL(url).origin;
+        // Primary: origin must match configured frontend origin
+        if (env.CORS_ORIGIN && urlOrigin === env.CORS_ORIGIN) return true;
+        // Secondary: when no CORS_ORIGIN is configured, fall back to SSRF guard
+        if (!env.CORS_ORIGIN) return isSafePublicHttpsUrl(url);
+        return false;
+      } catch {
+        return false;
+      }
+    };
+    return validateUrl(data.returnUrl) && validateUrl(data.cancelUrl);
+  }, {
+    message:
+      'returnUrl and cancelUrl must point to a safe public HTTPS URL or the configured frontend origin (CORS_ORIGIN).',
   });
 
 const captureBodySchema = z.object({
@@ -66,6 +114,7 @@ const voidBodySchema = z.object({
 
 router.post(
   '/milestones/:id/paypal/order',
+  requireDatabaseReadiness,
   requireAuth,
   requireMilestoneContractMember('id'),
   requireRole(['client', 'admin']),
@@ -189,6 +238,7 @@ router.post(
 
 router.post(
   '/payments/paypal/orders/:id/authorize',
+  requireDatabaseReadiness,
   requireAuth,
   requireRole(['client', 'admin']),
   paymentMutatingLimiter,
@@ -274,6 +324,7 @@ router.post(
 
 router.post(
   '/payments/paypal/authorizations/:id/capture',
+  requireDatabaseReadiness,
   requireAuth,
   requireRole(['client', 'admin']),
   paymentMutatingLimiter,
@@ -296,6 +347,35 @@ router.post(
 
       if (!isUserContractMember(payment.projectId, req.user!.id) && req.user!.role !== 'admin') {
         throw new AppError('Forbidden: You are not authorized to capture payments for this contract.', 403);
+      }
+
+      // Idempotency: if already captured, return existing result without calling PayPal again.
+      if (payment.status === 'CAPTURED') {
+        recordAuditEvent(
+          payment.id,
+          'DUPLICATE_CAPTURE_PREVENTED',
+          'operator',
+          {
+            attemptedAuthId: authorizationId,
+            currentStatus: payment.status,
+            existingCaptureId: payment.paypalCaptureId,
+            reason: 'Capture already completed; returning existing result.',
+          },
+          'Duplicate capture request for already-captured payment.',
+        );
+        throw new AppError(
+          `Payment '${payment.id}' (Auth: ${payment.paypalAuthorizationId}) has already been captured. Duplicate capture attempts are prevented by policy.`,
+          409,
+        );
+      }
+
+      // Claim server-side idempotency key (rejects duplicate/replayed keys).
+      const idempotencyKey = parseResult.data.idempotencyKey;
+      if (idempotencyKey && !claimIdempotencyKey(idempotencyKey)) {
+        throw new AppError(
+          `Idempotency key '${idempotencyKey}' has already been used for this payment. Duplicate request rejected.`,
+          409,
+        );
       }
 
       // Enforce strict policy: AUTHORIZED status + explicit confirmation
@@ -321,6 +401,8 @@ router.post(
         idempotencyKey: parseResult.data.idempotencyKey,
       });
 
+      // Conditional in-memory update: only transition if still AUTHORIZED.
+      // Prevents double-capture races where two concurrent requests both passed validation.
       updatePaymentStatus(
         payment.id,
         'CAPTURED',
@@ -336,6 +418,7 @@ router.post(
         {
           paypalCaptureId: captureResult.captureId,
         },
+        'AUTHORIZED', // expectedStatus: conditional transition
       );
 
       const serviceClient = getServiceSupabaseClient();
@@ -389,6 +472,7 @@ router.post(
 
 router.post(
   '/payments/paypal/authorizations/:id/void',
+  requireDatabaseReadiness,
   requireAuth,
   requireRole(['client', 'admin']),
   paymentMutatingLimiter,
@@ -413,6 +497,34 @@ router.post(
         throw new AppError('Forbidden: You are not authorized to void payments for this contract.', 403);
       }
 
+      // Idempotency: if already voided, return existing result without calling PayPal again.
+      if (payment.status === 'VOIDED') {
+        recordAuditEvent(
+          payment.id,
+          'DUPLICATE_VOID_PREVENTED',
+          'operator',
+          {
+            attemptedAuthId: authorizationId,
+            currentStatus: payment.status,
+            reason: 'Authorization already voided; returning existing result.',
+          },
+          'Duplicate void request for already-voided authorization.',
+        );
+        throw new AppError(
+          `Authorization '${payment.paypalAuthorizationId}' has already been voided.`,
+          409,
+        );
+      }
+
+      // Claim server-side idempotency key (rejects duplicate/replayed keys).
+      const voidIdempotencyKey = parseResult.data.idempotencyKey;
+      if (voidIdempotencyKey && !claimIdempotencyKey(voidIdempotencyKey)) {
+        throw new AppError(
+          `Idempotency key '${voidIdempotencyKey}' has already been used for this payment. Duplicate request rejected.`,
+          409,
+        );
+      }
+
       PaymentPolicyEngine.validateVoidEligibility(payment);
 
       const result = await paypalClient.voidAuthorization(
@@ -420,6 +532,7 @@ router.post(
         parseResult.data.idempotencyKey,
       );
 
+      // Conditional in-memory update: only transition if still AUTHORIZED.
       updatePaymentStatus(
         payment.id,
         'VOIDED',
@@ -430,6 +543,8 @@ router.post(
           reason: parseResult.data.reason || 'Operator voided authorization.',
         },
         'Authorization voided in PayPal Sandbox; temporary hold released.',
+        undefined,
+        'AUTHORIZED', // expectedStatus: conditional transition
       );
 
       const serviceClient = getServiceSupabaseClient();

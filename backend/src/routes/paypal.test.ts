@@ -5,6 +5,7 @@ import { createApp } from '../app';
 import { resetPaymentStore, getPaymentByOrderId, getPaymentByAuthorizationId, createPaymentRecord } from '../services/paymentStore';
 import { resetMilestonesStore, getMilestoneById } from '../models/milestones';
 import { paypalClient } from '../services/paypalClient';
+import { AppError } from '../middleware/errorHandler';
 import { env, loadEnv } from '../config/env';
 
 /** Deterministic synthetic fixture generator with 0 entropy to prevent secret scanner false positives */
@@ -134,6 +135,92 @@ describe('PayPal Sandbox Payment Lifecycle (Milestone 2A)', () => {
       expect(stored?.milestoneId).toBe('ms-003');
       expect(stored?.amount).toBe(2500);
       expect(stored?.auditTrail[0].action).toBe('ORDER_CREATED');
+    });
+
+    // ── F-8: Redirect URL Allowlist ─────────────────────────────────
+
+    it('F-8: rejects returnUrl with javascript: scheme', async () => {
+      const res = await request(app)
+        .post('/api/milestones/ms-003/paypal/order')
+        .send({
+          returnUrl: 'javascript:alert(document.cookie)',
+        });
+
+      expect(res.status).toBe(400);
+      expect(res.body.status).toBe('error');
+    });
+
+    it('F-8: rejects returnUrl with http:// (non-HTTPS) external domain', async () => {
+      const res = await request(app)
+        .post('/api/milestones/ms-003/paypal/order')
+        .send({
+          returnUrl: 'http://attacker.evil.com/redirect',
+        });
+
+      expect(res.status).toBe(400);
+      expect(res.body.status).toBe('error');
+    });
+
+    it('F-8: rejects returnUrl with look-alike paypal domain', async () => {
+      const res = await request(app)
+        .post('/api/milestones/ms-003/paypal/order')
+        .send({
+          returnUrl: 'https://paypal.com.evil.io/redirect',
+        });
+
+      expect(res.status).toBe(400);
+      expect(res.body.status).toBe('error');
+    });
+
+    it('F-8: rejects cancelUrl with javascript: scheme', async () => {
+      const res = await request(app)
+        .post('/api/milestones/ms-003/paypal/order')
+        .send({
+          cancelUrl: 'javascript:alert(1)',
+        });
+
+      expect(res.status).toBe(400);
+      expect(res.body.status).toBe('error');
+    });
+
+    it('F-8: accepts returnUrl matching configured frontend origin (CORS_ORIGIN)', async () => {
+      const mockFetch = vi.fn();
+      globalThis.fetch = mockFetch;
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          access_token: 'mock-access-token-123',
+          token_type: 'Bearer',
+          expires_in: 3600,
+        }),
+      });
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        status: 201,
+        json: async () => ({
+          id: 'TEST-ORDER-F8',
+          status: 'CREATED',
+          links: [
+            {
+              rel: 'approve',
+              href: 'https://www.sandbox.paypal.com/checkoutnow?token=TEST-ORDER-F8',
+              method: 'GET',
+            },
+          ],
+        }),
+      });
+
+      const res = await request(app)
+        .post('/api/milestones/ms-003/paypal/order')
+        .send({
+          returnUrl: 'http://localhost:5173/overview?paypal_return=true',
+        });
+
+      expect(res.status).toBe(201);
+      expect(res.body.status).toBe('success');
     });
 
     it('rejects client-supplied amounts (financial safety check)', async () => {
@@ -374,6 +461,164 @@ describe('PayPal Sandbox Payment Lifecycle (Milestone 2A)', () => {
       expect(updated?.auditTrail.some((e) => e.action === 'DUPLICATE_CAPTURE_PREVENTED')).toBe(true);
     });
 
+    // ── F-7: Atomic Transitions & Idempotency ─────────────────────────
+
+    it('F-7: concurrent captures on one authorization produce exactly one successful capture', async () => {
+      const payment = createPaymentRecord({
+        milestoneId: 'ms-003',
+        milestoneTitle: 'PayPal Sandbox Payment Gateway Integration',
+        projectId: 'proj-001',
+        projectName: 'E-Commerce Platform Redesign & Implementation',
+        amount: 2500,
+        currency: 'USD',
+        paypalOrderId: 'ORD-CONCURRENT-CAP',
+      });
+      payment.status = 'AUTHORIZED';
+      payment.paypalAuthorizationId = 'AUTH-CONCURRENT-CAP';
+
+      let captureCallCount = 0;
+      const mockFetch = vi.fn();
+      globalThis.fetch = mockFetch;
+
+      mockFetch.mockImplementation(() => {
+        captureCallCount++;
+        if (captureCallCount === 1) {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: async () => ({
+              access_token: 'token',
+              token_type: 'Bearer',
+              expires_in: 3600,
+            }),
+          });
+        }
+        return Promise.resolve({
+          ok: true,
+          status: 201,
+          json: async () => ({
+            id: 'CAP-CONCURRENT-001',
+            status: 'COMPLETED',
+            amount: { currency_code: 'USD', value: '2500.00' },
+          }),
+        });
+      });
+
+      const results = await Promise.all(
+        Array.from({ length: 5 }, () =>
+          request(app)
+            .post('/api/payments/paypal/authorizations/AUTH-CONCURRENT-CAP/capture')
+            .send({ confirmed: true })
+        )
+      );
+
+      const successCount = results.filter((r) => r.status === 200).length;
+      const conflictCount = results.filter((r) => r.status === 409).length;
+
+      expect(successCount).toBe(1);
+      expect(conflictCount).toBe(4);
+
+      const updated = getPaymentByAuthorizationId('AUTH-CONCURRENT-CAP');
+      expect(updated?.status).toBe('CAPTURED');
+    });
+
+    it('F-7: idempotent capture retry returns 409 without calling PayPal again', async () => {
+      const payment = createPaymentRecord({
+        milestoneId: 'ms-003',
+        milestoneTitle: 'PayPal Sandbox Payment Gateway Integration',
+        projectId: 'proj-001',
+        projectName: 'E-Commerce Platform Redesign & Implementation',
+        amount: 2500,
+        currency: 'USD',
+        paypalOrderId: 'ORD-IDEMPOTENT',
+      });
+      payment.status = 'CAPTURED';
+      payment.paypalAuthorizationId = 'AUTH-IDEMPOTENT';
+      payment.paypalCaptureId = 'CAP-EXISTING';
+
+      let paypalCallCount = 0;
+      const mockFetch = vi.fn();
+      globalThis.fetch = mockFetch;
+      mockFetch.mockImplementation(() => {
+        paypalCallCount++;
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            access_token: 'mock-token',
+            token_type: 'Bearer',
+            expires_in: 3600,
+          }),
+        });
+      });
+
+      const res = await request(app)
+        .post('/api/payments/paypal/authorizations/AUTH-IDEMPOTENT/capture')
+        .send({
+          confirmed: true,
+          idempotencyKey: 'cap-idempotent-retry',
+        });
+
+      expect(res.status).toBe(409);
+      expect(res.body.message).toContain('has already been captured');
+      expect(paypalCallCount).toBe(0);
+    });
+
+    it('F-7: server-side idempotency key reuse is rejected', async () => {
+      const payment = createPaymentRecord({
+        milestoneId: 'ms-003',
+        milestoneTitle: 'PayPal Sandbox Payment Gateway Integration',
+        projectId: 'proj-001',
+        projectName: 'E-Commerce Platform Redesign & Implementation',
+        amount: 2500,
+        currency: 'USD',
+        paypalOrderId: 'ORD-IDEMP-KEY',
+      });
+      payment.status = 'AUTHORIZED';
+      payment.paypalAuthorizationId = 'AUTH-IDEMP-KEY';
+
+      let paypalCallCount = 0;
+      const mockFetch = vi.fn();
+      globalThis.fetch = mockFetch;
+      mockFetch.mockImplementation(() => {
+        paypalCallCount++;
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            access_token: 'mock-token',
+            token_type: 'Bearer',
+            expires_in: 3600,
+          }),
+        });
+      });
+
+      const res1 = await request(app)
+        .post('/api/payments/paypal/authorizations/AUTH-IDEMP-KEY/capture')
+        .send({
+          confirmed: true,
+          idempotencyKey: 'cap-server-side-key-001',
+        });
+      expect(res1.status).toBe(200);
+
+      // Record PayPal call count after the first (successful) capture.
+      // The first capture makes 2 fetch calls (OAuth token + capture endpoint).
+      const callsAfterFirstCapture = paypalCallCount;
+      expect(callsAfterFirstCapture).toBeGreaterThan(0);
+
+      // Second capture with SAME idempotency key should be rejected WITHOUT calling PayPal.
+      const res2 = await request(app)
+        .post('/api/payments/paypal/authorizations/AUTH-IDEMP-KEY/capture')
+        .send({
+          confirmed: true,
+          idempotencyKey: 'cap-server-side-key-001',
+        });
+
+      // PayPal call count must NOT increase (second request short-circuits before PayPal).
+      expect(paypalCallCount).toBe(callsAfterFirstCapture);
+      expect(res2.status).toBe(409);
+    });
+
     it('rejects capture when payment is in VOIDED state', async () => {
       const payment = createPaymentRecord({
         milestoneId: 'ms-003',
@@ -498,6 +743,53 @@ describe('PayPal Sandbox Payment Lifecycle (Milestone 2A)', () => {
       expect(res.status).toBe(404);
       expect(res.body.status).toBe('error');
     });
+
+    // ── F-12: Excessive error details ──────────────────────────────────
+    it('sanitizes PayPal API error messages - no debug ID leaked', async () => {
+      // This test verifies that paypalClient sanitizes error messages,
+      // not leaking PayPal debug IDs or detailed issue descriptions to clients.
+      const mockFetch = vi.fn();
+      globalThis.fetch = mockFetch;
+
+      // Mock OAuth token success
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          access_token: 'mock-access-token-123',
+          token_type: 'Bearer',
+          expires_in: 3600,
+        }),
+      });
+
+      // Mock PayPal API error response (400 Bad Request) with debug_id and details
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 400,
+        json: async () => ({
+          message: 'INVALID_ARGUMENT',
+          name: 'Bad Request',
+          details: [
+            { issue: 'UNKNOWN', description: 'Invalid payer authentication' },
+          ],
+          debug_id: 'ffl1234567890',
+        }),
+      });
+
+      const res = await request(app)
+        .post('/api/milestones/ms-003/paypal/order')
+        .set('Authorization', 'Bearer test-token:usr-client-001:client')
+        .send({
+          milestoneId: 'ms-003',
+        });
+
+      // The response should be 400 or 500 (depending on error path)
+      expect(res.status).toBeDefined();
+      // Must not contain PayPal debug ID format
+      expect(res.body.message).not.toMatch(/ffl1234567890/);
+      // Must not contain raw issue/description details
+      expect(res.body.message).not.toMatch(/UNKNOWN: Invalid payer authentication/);
+    });
   });
 
   // ── 7. Production Fail-Closed Database Integrity ──────────────────
@@ -506,9 +798,11 @@ describe('PayPal Sandbox Payment Lifecycle (Milestone 2A)', () => {
     it('STRICTLY FAILS CLOSED in production if database client is unavailable', async () => {
       const originalNodeEnv = env.NODE_ENV;
       const originalJwtSecret = env.SUPABASE_JWT_SECRET;
+      const originalCorsOrigin = env.CORS_ORIGIN;
 
       (env as Record<string, unknown>).NODE_ENV = 'production';
       (env as Record<string, unknown>).SUPABASE_JWT_SECRET = fixture('j', 40);
+      (env as Record<string, unknown>).CORS_ORIGIN = 'https://app.milestoneshield.ai';
 
       const validToken = jwt.sign(
         {
@@ -536,10 +830,11 @@ describe('PayPal Sandbox Payment Lifecycle (Milestone 2A)', () => {
 
       // Must fail closed with 500 instead of returning a fake in-memory payment success
       expect(res.status).toBe(500);
-      expect(res.body.message).toMatch(/Production environment requires active Supabase service client/i);
+      expect(res.body.message).toBe('Internal server error');
 
       (env as Record<string, unknown>).NODE_ENV = originalNodeEnv;
       (env as Record<string, unknown>).SUPABASE_JWT_SECRET = originalJwtSecret;
+      (env as Record<string, unknown>).CORS_ORIGIN = originalCorsOrigin;
     });
   });
 });

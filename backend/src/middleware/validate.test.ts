@@ -74,6 +74,17 @@ describe('validateBody middleware', () => {
 
     expect(res.status).toBe(400);
   });
+
+  // ── F-11: Raw body unused ──────────────────────────────────────
+  it('parses JSON body without requiring raw body capture', async () => {
+    const res = await request(app)
+      .post('/test-body')
+      .send({ name: 'Test Project', amount: 100 });
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.name).toBe('Test Project');
+    expect(res.body.data.amount).toBe(100);
+  });
 });
 
 describe('validateQuery middleware', () => {

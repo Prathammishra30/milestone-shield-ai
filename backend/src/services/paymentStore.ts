@@ -21,6 +21,8 @@ export type SandboxPaymentStatus =
   | 'VOIDED'
   | 'FAILED';
 
+import { AppError } from '../middleware/errorHandler';
+
 export interface AuditEvent {
   id: string;
   timestamp: string;
@@ -32,6 +34,7 @@ export interface AuditEvent {
     | 'VOIDED'
     | 'PAYMENT_FAILED'
     | 'DUPLICATE_CAPTURE_PREVENTED'
+    | 'DUPLICATE_VOID_PREVENTED'
     | 'INVALID_TRANSITION_REJECTED';
   actor: 'client' | 'freelancer' | 'operator' | 'system';
   details: Record<string, unknown>;
@@ -75,6 +78,10 @@ export interface CreatePaymentInput {
 let payments: Map<string, TrackedPayment> = new Map();
 let counter = 1;
 
+// Server-side idempotency key registry (prevents duplicate processing
+// of the same idempotency key across concurrent or retried requests).
+const usedIdempotencyKeys = new Set<string>();
+
 export function createPaymentRecord(input: CreatePaymentInput): TrackedPayment {
   const id = `pay-sbx-${String(counter++).padStart(3, '0')}`;
   const now = new Date().toISOString();
@@ -114,6 +121,21 @@ export function createPaymentRecord(input: CreatePaymentInput): TrackedPayment {
 
   payments.set(id, record);
   return record;
+}
+
+/**
+ * Claims a server-side idempotency key for a payment transition.
+ *
+ * Returns true if the key is new (this caller may proceed).
+ * Returns false if the key has already been used (duplicate request — reject).
+ *
+ * Idempotency keys are stored server-side; clients must not be able to
+ * replay a captured/voided/authorized payment by reusing a key.
+ */
+export function claimIdempotencyKey(key: string): boolean {
+  if (usedIdempotencyKeys.has(key)) return false;
+  usedIdempotencyKeys.add(key);
+  return true;
 }
 
 export function getPaymentById(id: string): TrackedPayment | undefined {
@@ -170,10 +192,20 @@ export function updatePaymentStatus(
   details: Record<string, unknown>,
   note?: string,
   extraFields?: Partial<Pick<TrackedPayment, 'paypalAuthorizationId' | 'paypalCaptureId'>>,
+  expectedStatus?: SandboxPaymentStatus,
 ): TrackedPayment {
   const payment = payments.get(paymentId);
   if (!payment) {
     throw new Error(`Tracked payment '${paymentId}' not found in in-memory store`);
+  }
+
+  // Conditional transition: only proceed if the payment is in the expected state.
+  // This prevents double-capture, double-void, or stale downgrade races.
+  if (expectedStatus !== undefined && payment.status !== expectedStatus) {
+    throw new AppError(
+      `Cannot transition payment '${paymentId}' from '${payment.status}' to '${newStatus}'. Expected '${expectedStatus}'.`,
+      409,
+    );
   }
 
   const now = new Date().toISOString();
