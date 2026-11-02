@@ -922,4 +922,105 @@ describe('PayPal Webhook Signature Verification & Lifecycle Reconciliation (Mile
       expect(res.body.status).toBe('error');
     });
   });
+
+  // ── F-13: Dispute Audit Labels ─────────────────────────────────────
+
+  describe('F-13: Dispute audit labels use proper dispute actions', () => {
+    it('records CUSTOMER.DISPUTE.CREATED with DISPUTE_CREATED action (not INVALID_TRANSITION_REJECTED)', async () => {
+      vi.spyOn(paypalClient, 'verifyWebhookSignature').mockResolvedValueOnce({
+        verificationStatus: 'SUCCESS',
+      });
+
+      createPaymentRecord({
+        milestoneId: 'ms-001',
+        milestoneTitle: 'Dispute Test Milestone',
+        projectId: 'proj-001',
+        projectName: 'Dispute Test Project',
+        amount: 2500,
+        currency: 'USD',
+        paypalOrderId: 'ORD-DISPUTE-001',
+      });
+
+      const res = await request(app)
+        .post('/api/webhooks/paypal')
+        .set(validHeaders)
+        .send({
+          id: 'WH-EVT-DISPUTE-CREATED-001',
+          event_type: 'CUSTOMER.DISPUTE.CREATED',
+          resource: {
+            dispute_id: 'DP-001',
+            reason: 'Product not as described',
+            status: 'OPEN',
+            supplementary_data: {
+              related_ids: {
+                order_id: 'ORD-DISPUTE-001',
+              },
+            },
+          },
+        });
+
+      expect(res.status).toBe(200);
+      const payment = getPaymentByOrderId('ORD-DISPUTE-001');
+      expect(payment).toBeDefined();
+      const disputeEvent = payment?.auditTrail.find(
+        (e) => e.action === 'DISPUTE_CREATED'
+      );
+      expect(disputeEvent).toBeDefined();
+      expect(disputeEvent?.details.disputeId).toBe('DP-001');
+      expect(disputeEvent?.details.reason).toBe('Product not as described');
+      // Must NOT use INVALID_TRANSITION_REJECTED for dispute events
+      const invalidEvent = payment?.auditTrail.find(
+        (e) => e.action === 'INVALID_TRANSITION_REJECTED'
+      );
+      expect(invalidEvent).toBeUndefined();
+    });
+
+    it('records CUSTOMER.DISPUTE.RESOLVED with DISPUTE_RESOLVED action (not INVALID_TRANSITION_REJECTED)', async () => {
+      vi.spyOn(paypalClient, 'verifyWebhookSignature').mockResolvedValueOnce({
+        verificationStatus: 'SUCCESS',
+      });
+
+      createPaymentRecord({
+        milestoneId: 'ms-002',
+        milestoneTitle: 'Dispute Resolved Milestone',
+        projectId: 'proj-001',
+        projectName: 'Dispute Test Project',
+        amount: 2500,
+        currency: 'USD',
+        paypalOrderId: 'ORD-DISPUTE-002',
+      });
+
+      const res = await request(app)
+        .post('/api/webhooks/paypal')
+        .set(validHeaders)
+        .send({
+          id: 'WH-EVT-DISPUTE-RESOLVED-001',
+          event_type: 'CUSTOMER.DISPUTE.RESOLVED',
+          resource: {
+            dispute_id: 'DP-002',
+            dispute_outcome: 'WON_BY_SELLER',
+            supplementary_data: {
+              related_ids: {
+                order_id: 'ORD-DISPUTE-002',
+              },
+            },
+          },
+        });
+
+      expect(res.status).toBe(200);
+      const payment = getPaymentByOrderId('ORD-DISPUTE-002');
+      expect(payment).toBeDefined();
+      const disputeEvent = payment?.auditTrail.find(
+        (e) => e.action === 'DISPUTE_RESOLVED'
+      );
+      expect(disputeEvent).toBeDefined();
+      expect(disputeEvent?.details.disputeId).toBe('DP-002');
+      expect(disputeEvent?.details.outcome).toBe('WON_BY_SELLER');
+      // Must NOT use INVALID_TRANSITION_REJECTED for dispute events
+      const invalidEvent = payment?.auditTrail.find(
+        (e) => e.action === 'INVALID_TRANSITION_REJECTED'
+      );
+      expect(invalidEvent).toBeUndefined();
+    });
+  });
 });

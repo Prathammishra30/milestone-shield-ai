@@ -35,7 +35,9 @@ export interface AuditEvent {
     | 'PAYMENT_FAILED'
     | 'DUPLICATE_CAPTURE_PREVENTED'
     | 'DUPLICATE_VOID_PREVENTED'
-    | 'INVALID_TRANSITION_REJECTED';
+    | 'INVALID_TRANSITION_REJECTED'
+    | 'DISPUTE_CREATED'
+    | 'DISPUTE_RESOLVED';
   actor: 'client' | 'freelancer' | 'operator' | 'system';
   details: Record<string, unknown>;
   note?: string;

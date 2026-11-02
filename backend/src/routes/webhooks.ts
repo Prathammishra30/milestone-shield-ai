@@ -499,7 +499,7 @@ router.post(
           if (payment) {
             recordAuditEvent(
               payment.id,
-              'INVALID_TRANSITION_REJECTED',
+              'DISPUTE_CREATED',
               'system',
               {
                 disputeId: resource.dispute_id,
@@ -517,7 +517,7 @@ router.post(
           if (payment) {
             recordAuditEvent(
               payment.id,
-              'INVALID_TRANSITION_REJECTED',
+              'DISPUTE_RESOLVED',
               'system',
               {
                 disputeId: resource.dispute_id,
