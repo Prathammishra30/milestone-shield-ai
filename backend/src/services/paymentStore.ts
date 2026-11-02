@@ -55,6 +55,7 @@ export interface TrackedPayment {
   paypalCaptureId?: string;
   approveUrl?: string;
   idempotencyKey?: string;
+  authorizationExpirationTime?: string; // ISO 8601 authorization expiration from PayPal
   createdAt: string;
   updatedAt: string;
   auditTrail: AuditEvent[];
@@ -70,6 +71,7 @@ export interface CreatePaymentInput {
   paypalOrderId: string;
   approveUrl?: string;
   idempotencyKey?: string;
+  authorizationExpirationTime?: string; // ISO 8601 authorization expiration from PayPal
   actor?: 'client' | 'operator' | 'system';
   note?: string;
 }
@@ -114,6 +116,7 @@ export function createPaymentRecord(input: CreatePaymentInput): TrackedPayment {
     paypalOrderId: input.paypalOrderId,
     approveUrl: input.approveUrl,
     idempotencyKey: input.idempotencyKey,
+    authorizationExpirationTime: input.authorizationExpirationTime,
     createdAt: now,
     updatedAt: now,
     auditTrail: [initialAuditEvent],
@@ -191,7 +194,7 @@ export function updatePaymentStatus(
   actor: AuditEvent['actor'],
   details: Record<string, unknown>,
   note?: string,
-  extraFields?: Partial<Pick<TrackedPayment, 'paypalAuthorizationId' | 'paypalCaptureId'>>,
+  extraFields?: Partial<Pick<TrackedPayment, 'paypalAuthorizationId' | 'paypalCaptureId' | 'authorizationExpirationTime'>>,
   expectedStatus?: SandboxPaymentStatus,
 ): TrackedPayment {
   const payment = payments.get(paymentId);
@@ -227,6 +230,9 @@ export function updatePaymentStatus(
   }
   if (extraFields?.paypalCaptureId) {
     payment.paypalCaptureId = extraFields.paypalCaptureId;
+  }
+  if (extraFields?.authorizationExpirationTime) {
+    payment.authorizationExpirationTime = extraFields.authorizationExpirationTime;
   }
 
   payments.set(paymentId, payment);

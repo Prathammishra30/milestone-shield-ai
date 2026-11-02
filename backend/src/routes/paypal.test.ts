@@ -641,6 +641,112 @@ describe('PayPal Sandbox Payment Lifecycle (Milestone 2A)', () => {
       expect(res.status).toBe(409);
       expect(res.body.message).toContain('Voided authorizations cannot be captured');
     });
+
+    // ── F-12: Authorization Expiry ──────────────────────────────────
+
+    it('rejects capture of expired authorization with 409 Conflict', async () => {
+      const expiredTime = new Date(Date.now() - 3600000).toISOString(); // 1 hour ago
+      const payment = createPaymentRecord({
+        milestoneId: 'ms-003',
+        milestoneTitle: 'Expired Authorization Test',
+        projectId: 'proj-001',
+        projectName: 'Expiry Test Project',
+        amount: 2500,
+        currency: 'USD',
+        paypalOrderId: 'ORD-EXPIRED-CAP',
+        authorizationExpirationTime: expiredTime,
+      });
+      payment.status = 'AUTHORIZED';
+      payment.paypalAuthorizationId = 'AUTH-EXPIRED-CAP';
+
+      const res = await request(app)
+        .post('/api/payments/paypal/authorizations/AUTH-EXPIRED-CAP/capture')
+        .send({
+          confirmed: true,
+          operatorNote: 'Attempting capture after expiry.',
+        });
+
+      expect(res.status).toBe(409);
+      expect(res.body.message).toContain('expired');
+      expect(res.body.message).toContain('cannot be captured');
+    });
+
+    it('rejects void of expired authorization with 409 Conflict', async () => {
+      const expiredTime = new Date(Date.now() - 3600000).toISOString(); // 1 hour ago
+      const payment = createPaymentRecord({
+        milestoneId: 'ms-003',
+        milestoneTitle: 'Expired Authorization Void Test',
+        projectId: 'proj-001',
+        projectName: 'Expiry Test Project',
+        amount: 2500,
+        currency: 'USD',
+        paypalOrderId: 'ORD-EXPIRED-VOID',
+        authorizationExpirationTime: expiredTime,
+      });
+      payment.status = 'AUTHORIZED';
+      payment.paypalAuthorizationId = 'AUTH-EXPIRED-VOID';
+
+      const res = await request(app)
+        .post('/api/payments/paypal/authorizations/AUTH-EXPIRED-VOID/void')
+        .send({});
+
+      expect(res.status).toBe(409);
+      expect(res.body.message).toContain('expired');
+      expect(res.body.message).toContain('cannot be voided');
+    });
+
+    it('allows capture of non-expired authorization', async () => {
+      const futureTime = new Date(Date.now() + 86400000).toISOString(); // 1 day from now
+      const payment = createPaymentRecord({
+        milestoneId: 'ms-003',
+        milestoneTitle: 'Valid Authorization Test',
+        projectId: 'proj-001',
+        projectName: 'Valid Expiry Test Project',
+        amount: 2500,
+        currency: 'USD',
+        paypalOrderId: 'ORD-VALID-CAP',
+        authorizationExpirationTime: futureTime,
+      });
+      payment.status = 'AUTHORIZED';
+      payment.paypalAuthorizationId = 'AUTH-VALID-CAP';
+
+      const mockFetch = vi.fn();
+      globalThis.fetch = mockFetch;
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          access_token: 'mock-access-token-123',
+          token_type: 'Bearer',
+          expires_in: 3600,
+        }),
+      });
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        status: 201,
+        json: async () => ({
+          id: 'CAP-VALID-999',
+          status: 'COMPLETED',
+          amount: {
+            currency_code: 'USD',
+            value: '2500.00',
+          },
+        }),
+      });
+
+      const res = await request(app)
+        .post('/api/payments/paypal/authorizations/AUTH-VALID-CAP/capture')
+        .send({
+          confirmed: true,
+          operatorNote: 'Capture before expiry.',
+        });
+
+      expect(res.status).toBe(200);
+      const updated = getPaymentByAuthorizationId('AUTH-VALID-CAP');
+      expect(updated?.status).toBe('CAPTURED');
+    });
   });
 
   // ── 5. Void Authorization ─────────────────────────────────────────

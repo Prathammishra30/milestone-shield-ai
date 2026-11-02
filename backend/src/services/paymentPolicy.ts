@@ -91,6 +91,18 @@ export class PaymentPolicyEngine {
         400,
       );
     }
+
+    // F-12: Authorization expiry check - reject capture if authorization has expired
+    if (payment.authorizationExpirationTime) {
+      const expiration = new Date(payment.authorizationExpirationTime).getTime();
+      const now = Date.now();
+      if (now > expiration) {
+        throw new AppError(
+          `Authorization '${payment.paypalAuthorizationId}' expired on ${payment.authorizationExpirationTime}. Expired authorizations cannot be captured.`,
+          409,
+        );
+      }
+    }
   }
 
   /**
@@ -123,6 +135,18 @@ export class PaymentPolicyEngine {
         `Payment '${payment.id}' does not have a recorded PayPal Authorization ID.`,
         400,
       );
+    }
+
+    // F-12: Authorization expiry check - reject void if authorization has expired
+    if (payment.authorizationExpirationTime) {
+      const expiration = new Date(payment.authorizationExpirationTime).getTime();
+      const now = Date.now();
+      if (now > expiration) {
+        throw new AppError(
+          `Authorization '${payment.paypalAuthorizationId}' expired on ${payment.authorizationExpirationTime}. Expired authorizations cannot be voided.`,
+          409,
+        );
+      }
     }
   }
 }

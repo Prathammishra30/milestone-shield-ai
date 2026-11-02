@@ -248,6 +248,7 @@ router.post(
           'PayPal order authorized successfully after buyer approval.',
           {
             paypalAuthorizationId: result.authorizationId,
+            authorizationExpirationTime: result.expirationTime,
           },
         );
 
