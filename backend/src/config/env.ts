@@ -30,6 +30,24 @@ function loadDotenvFiles(): void {
 
 loadDotenvFiles();
 
+/**
+ * Strict boolean env parser. Treats the string "false" (case-insensitive)
+ * as boolean false, unlike z.coerce.boolean() which coerces any non-empty
+ * string to true. This is a security requirement: AUTH_BYPASS_ENABLED=false
+ * and ALLOW_IN_MEMORY_STORES=false in .env must never be coerced to true.
+ */
+function strictBoolean(val: unknown): boolean {
+  if (val === undefined || val === '' || val === null) return false;
+  if (typeof val === 'string') {
+    const trimmed = val.trim().toLowerCase();
+    if (trimmed === 'false' || trimmed === '0' || trimmed === 'no' || trimmed === 'off')
+      return false;
+    if (trimmed === 'true' || trimmed === '1' || trimmed === 'yes' || trimmed === 'on')
+      return true;
+  }
+  return Boolean(val);
+}
+
 export const envSchema = z.object({
   PORT: z.coerce.number().default(3001),
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
@@ -75,9 +93,9 @@ export const envSchema = z.object({
   SUPABASE_JWT_SECRET: z.string().optional(),
 
   // Operational & Caching
-  TRUST_PROXY: z.coerce.boolean().default(false),
+  TRUST_PROXY: z.preprocess(strictBoolean, z.boolean()).default(false),
   REDIS_URL: z.string().url().optional(),
-  ALLOW_IN_MEMORY_STORES: z.coerce.boolean().default(false),
+  ALLOW_IN_MEMORY_STORES: z.preprocess(strictBoolean, z.boolean()).default(false),
 
   // Auth bypass — explicit opt-in required in production;
   // enabled by default only in non-production for local development/testing.
@@ -86,9 +104,9 @@ export const envSchema = z.object({
       if (val === undefined || val === '' || val === null) {
         return process.env.NODE_ENV !== 'production';
       }
-      return val;
+      return strictBoolean(val);
     },
-    z.coerce.boolean()
+    z.boolean()
   ),
 
   // Future: Anthropic
