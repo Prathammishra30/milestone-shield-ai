@@ -38,6 +38,29 @@ function getParamString(param: string | string[] | undefined): string {
   return param || '';
 }
 
+/**
+ * Middleware: Ensures database readiness for financial operations in production.
+ * Must run BEFORE requireAuth so that DB unavailability returns 500 (fail closed)
+ * instead of an auth error (401/403).
+ */
+function requireDatabaseReadiness(
+  _req: Request,
+  _res: Response,
+  next: NextFunction
+): void {
+  try {
+    assertDatabaseReadinessForPayments();
+    next();
+  } catch (err) {
+    next(
+      new AppError(
+        'Production environment requires active Supabase service client for financial ledger recording. In-memory fallback rejected.',
+        500
+      )
+    );
+  }
+}
+
 // ── Validation Schemas ──────────────────────────────────────────────
 
 const createOrderBodySchema = z
@@ -91,6 +114,7 @@ const voidBodySchema = z.object({
 
 router.post(
   '/milestones/:id/paypal/order',
+  requireDatabaseReadiness,
   requireAuth,
   requireMilestoneContractMember('id'),
   requireRole(['client', 'admin']),
@@ -214,6 +238,7 @@ router.post(
 
 router.post(
   '/payments/paypal/orders/:id/authorize',
+  requireDatabaseReadiness,
   requireAuth,
   requireRole(['client', 'admin']),
   paymentMutatingLimiter,
@@ -299,6 +324,7 @@ router.post(
 
 router.post(
   '/payments/paypal/authorizations/:id/capture',
+  requireDatabaseReadiness,
   requireAuth,
   requireRole(['client', 'admin']),
   paymentMutatingLimiter,
@@ -446,6 +472,7 @@ router.post(
 
 router.post(
   '/payments/paypal/authorizations/:id/void',
+  requireDatabaseReadiness,
   requireAuth,
   requireRole(['client', 'admin']),
   paymentMutatingLimiter,

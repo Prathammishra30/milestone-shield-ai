@@ -166,7 +166,7 @@ export async function authenticateToken(token: string): Promise<AuthenticatedUse
 
   throw new AppError(
     'Authentication service not configured. Set SUPABASE_URL and SUPABASE_ANON_KEY (or SUPABASE_JWT_SECRET) in backend/.env',
-    500
+    env.AUTH_BYPASS_ENABLED === false ? 401 : 500
   );
 }
 
